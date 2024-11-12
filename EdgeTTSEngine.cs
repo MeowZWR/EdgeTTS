@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security;
@@ -7,82 +6,44 @@ using System.Text;
 
 namespace EdgeTTS;
 
-public class EdgeTTSEngine : IDisposable
+public class EdgeTTSEngine(string cacheFolder) : IDisposable
 {
     private const string WSS_URL = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-    private const int MAX_CONCURRENT_AUDIO = 3;
 
-    private readonly string _cacheDir;
     private readonly CancellationTokenSource _wsCancellation = new();
-    private readonly SemaphoreSlim _audioSemaphore = new(MAX_CONCURRENT_AUDIO);
-    private readonly ConcurrentQueue<QueuedAudio> _audioQueue = [];
-    private readonly CancellationTokenSource _queueCancellation = new();
+    private readonly CancellationTokenSource _operationCancellation = new();
     private WebSocket? _webSocket;
     private bool _disposed;
 
     public static readonly Voice[] Voices =
     [
-        new("zh-CN-XiaoxiaoNeural", "中文-普通话-女 晓晓"),
-        new("zh-CN-XiaoyiNeural", "中文-普通话-女 晓依"),
-        new("zh-CN-YunjianNeural", "中文-普通话-男 云健"),
-        new("zh-CN-YunyangNeural", "中文-普通话-新闻-男 云扬"),
-        new("zh-CN-YunxiaNeural", "中文-普通话-儿童-男 云霞"),
-        new("zh-CN-YunxiNeural", "中文-普通话-男 云希"),
-        new("zh-HK-HiuMaanNeural", "中文-粤语-女 曉佳"),
-        new("zh-TW-HsiaoChenNeural", "中文-台普-女 曉臻"),
-        new("ja-JP-NanamiNeural", "日语-女 七海"),
-        new("en-US-AriaNeural", "英语-美国-女 阿莉雅"),
-        new("en-US-JennyNeural", "英语-美国-女 珍妮"),
-        new("en-US-GuyNeural", "英语-美国-男 盖"),
-        new("en-GB-SoniaNeural", "英语-英国-女 索尼娅")
+        new("zh-CN-XiaoxiaoNeural", "晓晓 (中文-普通话-女)"),
+        new("zh-CN-XiaoyiNeural", "晓依 (中文-普通话-女)"),
+        new("zh-CN-YunjianNeural", "云健 (中文-普通话-男)"),
+        new("zh-CN-YunyangNeural", "云扬 (中文-普通话-新闻-男)"),
+        new("zh-CN-YunxiaNeural", "云霞 (中文-普通话-儿童-男)"),
+        new("zh-CN-YunxiNeural", "云希 (中文-普通话-男)"),
+        new("zh-HK-HiuMaanNeural", "曉佳 (中文-廣東話-女)"),
+        new("zh-TW-HsiaoChenNeural", "曉臻 (中文-國語-女)"),
+        new("ja-JP-NanamiNeural", "七海 (日本語-女)"),
+        new("en-US-AriaNeural", "Aria (English-American-Female)"),
+        new("en-US-JennyNeural", "Jenny (English-American-Female)"),
+        new("en-US-GuyNeural", "Guy (English-American-Male)"),
+        new("en-GB-SoniaNeural", "Sonia (English-Britain-Female)")
     ];
 
-    public EdgeTTSEngine(string cacheFolder)
+    public void Speak(string text, EdgeTTSSettings settings)
     {
-        _cacheDir = cacheFolder;
-        StartQueueProcessor();
-    }
+        ThrowIfDisposed();
 
-    private void StartQueueProcessor()
-    {
-        Task.Run(async () =>
-        {
-            while (!_queueCancellation.Token.IsCancellationRequested)
-            {
-                if (_audioQueue.TryDequeue(out var queuedAudio))
-                {
-                    try
-                    {
-                        await _audioSemaphore.WaitAsync(_queueCancellation.Token);
-                        await PlayAudioFromQueue(queuedAudio);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        queuedAudio.Completion.TrySetException(ex);
-                    }
-                }
-                else
-                {
-                    await Task.Delay(100, _queueCancellation.Token);
-                }
-            }
-        }, _queueCancellation.Token);
-    }
-
-    private async Task PlayAudioFromQueue(QueuedAudio queuedAudio)
-    {
         try
         {
-            await AudioPlayer.PlayAudioAsync(queuedAudio.FilePath);
-            queuedAudio.Completion.TrySetResult(true);
+            var task = Task.Run(() => SpeakAsync(text, settings), _operationCancellation.Token);
+            task.GetAwaiter().GetResult();
         }
-        finally
+        catch (OperationCanceledException)
         {
-            _audioSemaphore.Release();
+            // ignored
         }
     }
 
@@ -110,9 +71,7 @@ public class EdgeTTSEngine : IDisposable
 
         if (!string.IsNullOrWhiteSpace(audioFile))
         {
-            var queuedAudio = new QueuedAudio(audioFile);
-            _audioQueue.Enqueue(queuedAudio);
-            await queuedAudio.Completion.Task;
+            await AudioPlayer.PlayAudioAsync(audioFile);
         }
     }
 
@@ -198,11 +157,11 @@ public class EdgeTTSEngine : IDisposable
         lock (this)
         {
             var hash = ComputeHash($"EdgeTTS.{text}.{parameter}")[..10];
-            var cacheFile = Path.Combine(_cacheDir, $"{hash}.mp3");
+            var cacheFile = Path.Combine(cacheFolder, $"{hash}.mp3");
 
             if (!File.Exists(cacheFile))
             {
-                Directory.CreateDirectory(_cacheDir);
+                Directory.CreateDirectory(cacheFolder);
                 var content = createContent();
                 if (content == null) return cacheFile;
 
@@ -229,11 +188,7 @@ public class EdgeTTSEngine : IDisposable
     {
         if (!_disposed)
         {
-            _queueCancellation.Cancel();
-            while (_audioQueue.TryDequeue(out var audio))
-            {
-                audio.Completion.TrySetCanceled();
-            }
+            _operationCancellation.Cancel();
         }
     }
 
@@ -244,9 +199,8 @@ public class EdgeTTSEngine : IDisposable
             if (disposing)
             {
                 Stop();
-                _queueCancellation.Dispose();
+                _operationCancellation.Dispose();
                 _wsCancellation.Dispose();
-                _audioSemaphore.Dispose();
                 _webSocket?.Dispose();
             }
 
@@ -263,11 +217,5 @@ public class EdgeTTSEngine : IDisposable
     ~EdgeTTSEngine()
     {
         Dispose(false);
-    }
-
-    private class QueuedAudio(string filePath)
-    {
-        public string                     FilePath   { get; } = filePath;
-        public TaskCompletionSource<bool> Completion { get; } = new();
     }
 }
