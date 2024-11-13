@@ -6,98 +6,168 @@ namespace EdgeTTS;
 
 internal static class WebSocketHelper
 {
-    public static void SendText(this WebSocket ws, string msg, CancellationTokenSource cancellationTokenSource)
+    private const int BUFFER_SIZE = 5 * 1024;
+
+    public static async Task SendTextAsync(
+        this WebSocket ws,
+        string message,
+        CancellationToken cancellationToken)
     {
-        ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(msg)),
-                     WebSocketMessageType.Text, true,
-                     cancellationTokenSource.Token).Wait();
+        var buffer = Encoding.UTF8.GetBytes(message);
+        await ws.SendAsync(
+            new ReadOnlyMemory<byte>(buffer),
+            WebSocketMessageType.Text,
+            true,
+            cancellationToken);
     }
 
-    public class Message
+    public sealed record WebSocketMessage
     {
-        public static readonly Message Close = new();
+        public static readonly WebSocketMessage Close = new(WebSocketMessageType.Close);
 
-        public readonly WebSocketMessageType Type;
+        public WebSocketMessageType Type          { get; }
+        public string?              MessageStr    { get; }
+        public byte[]?              MessageBinary { get; }
 
-        public readonly string? MessageStr;
+        public WebSocketMessage(string message)
+            : this(WebSocketMessageType.Text, message) { }
 
-        public readonly byte[]? MessageBinary;
+        public WebSocketMessage(byte[] message)
+            : this(WebSocketMessageType.Binary, null, message) { }
 
-        public Message(string message)
+        private WebSocketMessage(WebSocketMessageType type, string? messageStr = null, byte[]? messageBinary = null)
         {
-            Type = WebSocketMessageType.Text;
-            MessageStr = message;
-            MessageBinary = null;
+            Type = type;
+            MessageStr = messageStr;
+            MessageBinary = messageBinary;
         }
 
-        public Message(byte[] message)
+        public override string ToString()
         {
-            Type = WebSocketMessageType.Binary;
-            MessageStr = null;
-            MessageBinary = message;
+            return
+                $"{nameof(Type)}: {Type}, {nameof(MessageStr)}: {MessageStr}, {nameof(MessageBinary)}: byte[{MessageBinary?.Length ?? -1}]";
         }
-
-        private Message()
-        {
-            Type = WebSocketMessageType.Close;
-            MessageStr = null;
-            MessageBinary = null;
-        }
-
-        public override string ToString() 
-            => $"{nameof(Type)}: {Type}, {nameof(MessageStr)}: {MessageStr}, {nameof(MessageBinary)}: byte[{MessageBinary?.Length ?? -1}]";
     }
 
-    public class Session(WebSocket ws)
+    public sealed class WebSocketSession : IDisposable
     {
-        public readonly WebSocket ws = ws;
-        public readonly StringBuilder sb = new();
-        public readonly MemoryStream buffer = new();
-        public readonly byte[] array = new byte[5 * 1024];
-    }
+        private readonly WebSocket _webSocket;
+        private readonly StringBuilder _textBuffer;
+        private readonly MemoryStream _binaryBuffer;
+        private readonly byte[] _receiveBuffer;
+        private bool _disposed;
 
-    public static Message ReceiveNextMessage(Session session, CancellationTokenSource cancellationTokenSource)
-    {
-        var ws = session.ws;
-        var sb = session.sb;
-        var buffer = session.buffer;
-        var array = session.array;
-
-        sb.Clear();
-        buffer.Position = 0;
-        buffer.SetLength(0);
-
-        WebSocketMessageType? previousMessageType = null;
-
-        while (true)
+        public WebSocketSession(WebSocket webSocket)
         {
-            var result = ws.ReceiveAsync(new ArraySegment<byte>(array), cancellationTokenSource.Token).Result;
+            _webSocket = webSocket;
+            _textBuffer = new StringBuilder();
+            _binaryBuffer = new MemoryStream();
+            _receiveBuffer = new byte[BUFFER_SIZE];
+        }
+
+        public async Task<WebSocketMessage> ReceiveNextMessageAsync(CancellationToken cancellationToken)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(WebSocketSession));
+
+            ResetBuffers();
+            WebSocketMessageType? previousMessageType = null;
+
+            try
+            {
+                while (true)
+                {
+                    var result = await _webSocket.ReceiveAsync(
+                                     new ArraySegment<byte>(_receiveBuffer),
+                                     cancellationToken);
+
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        Debug.Assert(_textBuffer.Length == 0);
+                        Debug.Assert(_binaryBuffer.Length == 0);
+                        return WebSocketMessage.Close;
+                    }
+
+                    await ProcessWebSocketMessageAsync(result, previousMessageType);
+                    previousMessageType = result.MessageType;
+
+                    if (result.EndOfMessage) return CreateMessage(result.MessageType);
+                }
+            }
+            catch (Exception ex) { throw new IOException("Failed to receive WebSocket message", ex); }
+        }
+
+        private async Task ProcessWebSocketMessageAsync(
+            WebSocketReceiveResult result,
+            WebSocketMessageType? previousMessageType)
+        {
+            if (previousMessageType.HasValue && previousMessageType != result.MessageType)
+                throw new IOException(
+                    $"Unexpected message type change from {previousMessageType} to {result.MessageType}");
+
+            if (result.Count <= 0) return;
+
             switch (result.MessageType)
             {
                 case WebSocketMessageType.Text:
-                    if (previousMessageType != null && previousMessageType != WebSocketMessageType.Text)
-                        throw new IOException("Unexpected WebSocketMessageType");
-
-                    if (result.Count > 0) sb.Append(Encoding.UTF8.GetString(array, 0, result.Count));
+                    _textBuffer.Append(Encoding.UTF8.GetString(_receiveBuffer, 0, result.Count));
                     break;
+
                 case WebSocketMessageType.Binary:
-                    if (previousMessageType != null && previousMessageType != WebSocketMessageType.Binary)
-                        throw new IOException("Unexpected WebSocketMessageType");
-
-                    if (result.Count > 0) buffer.Write(array, 0, result.Count);
+                    await _binaryBuffer.WriteAsync(_receiveBuffer.AsMemory(0, result.Count));
                     break;
-                case WebSocketMessageType.Close:
-                    Debug.Assert(sb.Length == 0);
-                    Debug.Assert(buffer.Length == 0);
-                    return Message.Close;
+
                 default:
-                    throw new ArgumentOutOfRangeException();
+                    throw new ArgumentOutOfRangeException(
+                        nameof(result.MessageType),
+                        result.MessageType,
+                        "Unsupported WebSocket message type");
             }
-
-            previousMessageType = result.MessageType;
-
-            if (result.EndOfMessage)
-                return previousMessageType == WebSocketMessageType.Text ? new Message(sb.ToString()) : new Message(buffer.ToArray());
         }
+
+        private void ResetBuffers()
+        {
+            _textBuffer.Clear();
+            _binaryBuffer.Position = 0;
+            _binaryBuffer.SetLength(0);
+        }
+
+        private WebSocketMessage CreateMessage(WebSocketMessageType messageType)
+        {
+            return messageType switch
+            {
+                WebSocketMessageType.Text => new WebSocketMessage(_textBuffer.ToString()),
+                WebSocketMessageType.Binary => new WebSocketMessage(_binaryBuffer.ToArray()),
+                _ => throw new ArgumentOutOfRangeException(nameof(messageType))
+            };
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+
+            _binaryBuffer.Dispose();
+            _disposed = true;
+        }
+    }
+
+    public static async Task<bool> IsConnectedAsync(this WebSocket webSocket) => webSocket.State == WebSocketState.Open;
+
+    public static async Task SafeCloseAsync(
+        this WebSocket webSocket,
+        WebSocketCloseStatus closeStatus = WebSocketCloseStatus.NormalClosure,
+        string? statusDescription = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (await webSocket.IsConnectedAsync())
+            {
+                await webSocket.CloseAsync(
+                    closeStatus,
+                    statusDescription ?? "Closing",
+                    cancellationToken);
+            }
+        }
+        catch (Exception) { webSocket.Abort(); }
     }
 }

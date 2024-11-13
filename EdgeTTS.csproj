@@ -34,8 +34,4 @@
     <PackageReference Include="System.Net.WebSockets.Client.Managed" Version="1.0.22" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\OmenTools\OmenTools.csproj" />
-  </ItemGroup>
-
 </Project>

@@ -6,12 +6,11 @@ using System.Text;
 
 namespace EdgeTTS;
 
-public class EdgeTTSEngine(string cacheFolder) : IDisposable
+public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
 {
     private const string WSS_URL = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-
-    private readonly CancellationTokenSource _wsCancellation = new();
-    private readonly CancellationTokenSource _operationCancellation = new();
+    private readonly CancellationTokenSource _wsCts = new();
+    private readonly CancellationTokenSource _operationCts = new();
     private WebSocket? _webSocket;
     private bool _disposed;
 
@@ -35,39 +34,18 @@ public class EdgeTTSEngine(string cacheFolder) : IDisposable
     public void Speak(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
-
         try
         {
-            var task = Task.Run(() => SpeakAsync(text, settings), _operationCancellation.Token);
-            task.GetAwaiter().GetResult();
+            Task.Run(() => SpeakAsync(text, settings), _operationCts.Token).GetAwaiter().GetResult();
         }
-        catch (OperationCanceledException)
-        {
-            // ignored
-        }
+        catch (OperationCanceledException) { }
     }
 
     public async Task SpeakAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
-
-        text = SecurityElement.Escape(text);
-
-        var audioFile = GetOrCreateAudioFile(text, settings.ToString(), () =>
-        {
-            for (var retry = 0; retry < 3; retry++)
-            {
-                try
-                {
-                    return Synthesize(settings, text);
-                }
-                catch (Exception ex) when (IsConnectionResetError(ex))
-                {
-                    if (retry == 2) throw;
-                }
-            }
-            return null;
-        });
+        var safeText = SecurityElement.Escape(text);
+        var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
 
         if (!string.IsNullOrWhiteSpace(audioFile))
         {
@@ -75,68 +53,68 @@ public class EdgeTTSEngine(string cacheFolder) : IDisposable
         }
     }
 
-    private static bool IsConnectionResetError(Exception? ex)
+    private async Task<string> GetOrCreateAudioFileAsync(string text, EdgeTTSSettings settings)
     {
-        while (ex != null)
+        var hash = ComputeHash($"EdgeTTS.{text}.{settings}")[..10];
+        var cacheFile = Path.Combine(cacheFolder, $"{hash}.mp3");
+
+        if (!File.Exists(cacheFile))
         {
-            if (ex is SocketException { SocketErrorCode: SocketError.ConnectionReset })
-                return true;
-            ex = ex.InnerException;
+            Directory.CreateDirectory(cacheFolder);
+            var content = await SynthesizeWithRetryAsync(settings, text);
+            if (content != null)
+            {
+                await File.WriteAllBytesAsync(cacheFile, content);
+            }
         }
-        return false;
+
+        return cacheFile;
     }
 
-    private byte[]? Synthesize(EdgeTTSSettings settings, string text)
+    private async Task<byte[]?> SynthesizeWithRetryAsync(EdgeTTSSettings settings, string text)
     {
-        try
+        for (var retry = 0; retry < 3; retry++)
         {
-            var ws = GetWebSocketConnection();
-            return ws == null ? null : AzureWSSynthesiser.Synthesis(
-                ws, _wsCancellation, text,
-                settings.Speed, settings.Pitch,
-                settings.Volume, settings.Voice);
+            try
+            {
+                var ws = await GetWebSocketConnectionAsync();
+                return ws == null ? null : await AzureWSSynthesiser.SynthesisAsync(
+                    ws, _wsCts.Token, text,
+                    settings.Speed, settings.Pitch,
+                    settings.Volume, settings.Voice);
+            }
+            catch (Exception ex) when (IsConnectionResetError(ex) && retry < 2)
+            {
+                continue;
+            }
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine(ex.Message);
-            throw;
-        }
+        return null;
     }
 
-    private WebSocket? GetWebSocketConnection()
+    private async Task<WebSocket?> GetWebSocketConnectionAsync()
     {
         ThrowIfDisposed();
 
-        lock (this)
+        if (_wsCts.IsCancellationRequested) return null;
+
+        if (_webSocket is not { State: WebSocketState.Open })
         {
-            if (_wsCancellation.IsCancellationRequested) return null;
-
-            if (_webSocket == null || ShouldRecreateWebSocket())
-            {
-                _webSocket?.Dispose();
-                _webSocket = CreateWebSocket();
-            }
-
-            return _webSocket;
+            _webSocket?.Dispose();
+            _webSocket = await CreateWebSocketAsync();
         }
+
+        return _webSocket;
     }
 
-    private bool ShouldRecreateWebSocket() => _webSocket?.State switch
-    {
-        WebSocketState.None => false,
-        WebSocketState.Connecting or WebSocketState.Open => false,
-        _ => true
-    };
-
-    private WebSocket CreateWebSocket()
+    private async Task<WebSocket> CreateWebSocketAsync()
     {
         var ws = SystemClientWebSocket.CreateClientWebSocket();
-        SetWebSocketHeaders(ws);
-        ws.ConnectAsync(new Uri(WSS_URL), _wsCancellation.Token).Wait();
+        ConfigureWebSocket(ws);
+        await ws.ConnectAsync(new Uri(WSS_URL), _wsCts.Token);
         return ws;
     }
 
-    private static void SetWebSocketHeaders(WebSocket ws)
+    private static void ConfigureWebSocket(WebSocket ws)
     {
         dynamic options = ws switch
         {
@@ -150,27 +128,9 @@ public class EdgeTTSEngine(string cacheFolder) : IDisposable
         options.SetRequestHeader("Pragma", "no-cache");
     }
 
-    private string GetOrCreateAudioFile(string text, string parameter, Func<byte[]?> createContent)
-    {
-        ThrowIfDisposed();
-
-        lock (this)
-        {
-            var hash = ComputeHash($"EdgeTTS.{text}.{parameter}")[..10];
-            var cacheFile = Path.Combine(cacheFolder, $"{hash}.mp3");
-
-            if (!File.Exists(cacheFile))
-            {
-                Directory.CreateDirectory(cacheFolder);
-                var content = createContent();
-                if (content == null) return cacheFile;
-
-                File.WriteAllBytes(cacheFile, content);
-            }
-
-            return cacheFile;
-        }
-    }
+    private static bool IsConnectionResetError(Exception? ex) =>
+        ex?.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset } ||
+        ex is SocketException { SocketErrorCode: SocketError.ConnectionReset };
 
     private static string ComputeHash(string input)
     {
@@ -180,42 +140,27 @@ public class EdgeTTSEngine(string cacheFolder) : IDisposable
 
     private void ThrowIfDisposed()
     {
-        if (!_disposed) return;
-        throw new ObjectDisposedException(nameof(EdgeTTSEngine));
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(EdgeTTSEngine));
     }
 
     public void Stop()
     {
         if (!_disposed)
-        {
-            _operationCancellation.Cancel();
-        }
-    }
-
-    protected virtual void Dispose(bool disposing)
-    {
-        if (!_disposed)
-        {
-            if (disposing)
-            {
-                Stop();
-                _operationCancellation.Dispose();
-                _wsCancellation.Dispose();
-                _webSocket?.Dispose();
-            }
-
-            _disposed = true;
-        }
+            _operationCts.Cancel();
     }
 
     public void Dispose()
     {
-        Dispose(true);
-        GC.SuppressFinalize(this);
-    }
+        if (_disposed) return;
 
-    ~EdgeTTSEngine()
-    {
-        Dispose(false);
+        _operationCts.Cancel();
+        _operationCts.Dispose();
+        _wsCts.Cancel();
+        _wsCts.Dispose();
+        _webSocket?.Dispose();
+
+        _disposed = true;
+        GC.SuppressFinalize(this);
     }
 }
