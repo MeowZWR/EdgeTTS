@@ -1,3 +1,4 @@
+using System;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security;
@@ -110,7 +111,7 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
     {
         var ws = SystemClientWebSocket.CreateClientWebSocket();
         ConfigureWebSocket(ws);
-        await ws.ConnectAsync(new Uri(WSS_URL), _wsCts.Token);
+        await ws.ConnectAsync(new Uri($"{WSS_URL}&Sec-MS-GEC={Sec_MS_GEC.Get()}&Sec-MS-GEC-Version=1-132.0.2917.0"), _wsCts.Token);
         return ws;
     }
 
