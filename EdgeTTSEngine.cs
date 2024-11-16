@@ -21,7 +21,7 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         new("zh-CN-XiaoyiNeural", "晓依 (中文-普通话-女)"),
         new("zh-CN-YunjianNeural", "云健 (中文-普通话-男)"),
         new("zh-CN-YunyangNeural", "云扬 (中文-普通话-新闻-男)"),
-        new("zh-CN-YunxiaNeural", "云霞 (中文-普通话-儿童-男)"),
+        new("zh-CN-YunxiaNeural", "云夏 (中文-普通话-儿童-男)"),
         new("zh-CN-YunxiNeural", "云希 (中文-普通话-男)"),
         new("zh-HK-HiuGaaiNeural", "曉佳 (中文-廣東話-女)"),
         new("zh-HK-HiuMaanNeural", "曉曼 (中文-廣東話-女)"),
@@ -56,7 +56,7 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
     public async Task SpeakAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
-        var safeText = SecurityElement.Escape(text).Replace('：', ':');
+        var safeText = SecurityElement.Escape(text.Replace('：', ':'));
         var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
 
         if (!string.IsNullOrWhiteSpace(audioFile))
