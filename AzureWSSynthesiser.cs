@@ -5,8 +5,10 @@ namespace EdgeTTS;
 
 internal static class AzureWSSynthesiser
 {
-    private const int WEBSOCKET_TIMEOUT_MS = 10000;
-    private const int BUFFER_SIZE = 4096;
+    private const int WEBSOCKET_TIMEOUT_MS = 15000;
+    private const int BUFFER_SIZE          = 4096;
+    private const int MAX_RETRIES          = 3;
+    private const int RETRY_DELAY_MS       = 1000;
 
     private static class PathConstants
     {
@@ -25,6 +27,65 @@ internal static class AzureWSSynthesiser
     }
 
     public static async Task<byte[]> SynthesisAsync(
+        WebSocket         ws,
+        CancellationToken cancellationToken,
+        string            text,
+        int               speed,
+        int               pitch,
+        int               volume,
+        string            voice,
+        string?           style       = null,
+        int               styleDegree = 100,
+        string?           role        = null)
+    {
+        ArgumentNullException.ThrowIfNull(ws);
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(voice);
+
+        int        retryCount    = 0;
+        Exception? lastException = null;
+
+        while (retryCount < MAX_RETRIES)
+        {
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(WEBSOCKET_TIMEOUT_MS);
+
+                return await ExecuteSynthesisAsync(
+                           ws, timeoutCts.Token, text, speed, pitch, volume, voice, style, styleDegree, role);
+            }
+            catch (Exception ex) when (ShouldRetry(ex) && retryCount < MAX_RETRIES - 1)
+            {
+                lastException = ex;
+                retryCount++;
+                
+                // 等待一段时间后重试
+                await Task.Delay(RETRY_DELAY_MS * retryCount, cancellationToken);
+                
+                // 检查WebSocket状态
+                if (ws.State != WebSocketState.Open)
+                {
+                    throw new InvalidOperationException(
+                        "WebSocket connection lost and needs to be re-established", ex);
+                }
+            }
+        }
+
+        throw new IOException($"Synthesis failed after {MAX_RETRIES} attempts", lastException);
+    }
+
+    private static bool ShouldRetry(Exception ex)
+    {
+        return ex switch
+        {
+            IOException ioEx        => true,
+            WebSocketException wsEx => wsEx.WebSocketErrorCode != WebSocketError.InvalidState,
+            _                       => false
+        };
+    }
+
+    private static async Task<byte[]> ExecuteSynthesisAsync(
         WebSocket ws,
         CancellationToken cancellationToken,
         string text,
@@ -32,45 +93,174 @@ internal static class AzureWSSynthesiser
         int pitch,
         int volume,
         string voice,
-        string? style = null,
-        int styleDegree = 100,
-        string? role = null)
+        string? style,
+        int styleDegree,
+        string? role)
     {
-        ArgumentNullException.ThrowIfNull(ws);
-        ArgumentNullException.ThrowIfNull(text);
-        ArgumentNullException.ThrowIfNull(voice);
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(WEBSOCKET_TIMEOUT_MS);
-
         var requestId = Guid.NewGuid().ToString("N");
         var timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffK");
 
         try
         {
-            // 确保 WebSocket 状态正常
             if (ws.State != WebSocketState.Open)
             {
                 throw new WebSocketException(WebSocketError.InvalidState, "WebSocket connection is not open");
             }
 
-            await SendConfigurationAsync(ws, requestId, timestamp, timeoutCts.Token);
-            await SendSpeechRequestAsync(ws, requestId, timestamp, text, speed, pitch, volume, voice, style,
-                                     styleDegree, role, timeoutCts.Token);
+            // 创建一个信号量来控制发送操作
+            using var sendLock = new SemaphoreSlim(1, 1);
+            
+            await SendWithRetryAsync(() => 
+                SendConfigurationAsync(ws, requestId, timestamp, cancellationToken), sendLock, cancellationToken);
+                
+            await SendWithRetryAsync(() => 
+                SendSpeechRequestAsync(ws, requestId, timestamp, text, speed, pitch, volume, 
+                    voice, style, styleDegree, role, cancellationToken), sendLock, cancellationToken);
 
-            return await ReceiveAudioDataAsync(ws, requestId, timeoutCts.Token);
-        }
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-        {
-            throw new TimeoutException("Synthesis operation timed out");
+            return await ReceiveAudioDataAsync(ws, requestId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             await SafeCloseWebSocketAsync(ws);
-            throw new IOException("Synthesis failed", ex);
+            throw;
         }
     }
 
+    private static async Task SendWithRetryAsync(
+        Func<Task> sendAction, 
+        SemaphoreSlim sendLock,
+        CancellationToken cancellationToken)
+    {
+        int attempts = 0;
+        while (attempts < 2) // 最多重试一次
+        {
+            try
+            {
+                await sendLock.WaitAsync(cancellationToken);
+                await sendAction();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or WebSocketException && attempts == 0)
+            {
+                attempts++;
+                await Task.Delay(500, cancellationToken); // 短暂延迟后重试
+            }
+            finally
+            {
+                sendLock.Release();
+            }
+        }
+    }
+    
+    private static async Task<byte[]> ReceiveAudioDataAsync(
+        WebSocket ws,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        var state = ProtocolState.NotStarted;
+        var receiveBuffer = new byte[BUFFER_SIZE];
+        var messageBuffer = new List<byte>();
+        
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                WebSocketReceiveResult result;
+                try
+                {
+                    result = await ws.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
+                }
+                catch (WebSocketException ex)
+                {
+                    if (buffer.Length > 0 && state == ProtocolState.Streaming)
+                    {
+                        // 如果已经收到了一些音频数据，尝试返回已收到的数据
+                        return buffer.ToArray();
+                    }
+                    throw;
+                }
+
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    if (buffer.Length > 0 && state == ProtocolState.Streaming)
+                    {
+                        return buffer.ToArray();
+                    }
+                    throw new IOException("Connection closed unexpectedly");
+                }
+
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    var message = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
+                    state = await HandleTextMessageAsync(message, requestId, state);
+
+                    if (state == ProtocolState.Streaming && message.Contains(PathConstants.TURN_END))
+                    {
+                        return buffer.ToArray();
+                    }
+                }
+                else if (result.MessageType == WebSocketMessageType.Binary)
+                {
+                    messageBuffer.AddRange(new ArraySegment<byte>(receiveBuffer, 0, result.Count));
+                    
+                    if (result.EndOfMessage)
+                    {
+                        await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, state, buffer);
+                        state = ProtocolState.Streaming;
+                        messageBuffer.Clear();
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is WebSocketException || ex is IOException)
+        {
+            if (buffer.Length > 0 && state == ProtocolState.Streaming)
+            {
+                // 如果已经收到了音频数据，返回部分数据而不是抛出异常
+                return buffer.ToArray();
+            }
+            throw;
+        }
+
+        throw new OperationCanceledException();
+    }
+
+    private static async Task SendWebSocketTextAsync(
+        WebSocket ws,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (ws.State != WebSocketState.Open)
+            {
+                throw new WebSocketException(WebSocketError.InvalidState);
+            }
+
+            byte[] buffer = Encoding.UTF8.GetBytes(message);
+            var segment = new ArraySegment<byte>(buffer);
+
+            // 分块发送大消息
+            const int chunkSize = 4096;
+            for (int i = 0; i < segment.Count; i += chunkSize)
+            {
+                int size = Math.Min(chunkSize, segment.Count - i);
+                bool endOfMessage = (i + size) >= segment.Count;
+                
+                await ws.SendAsync(
+                    new ArraySegment<byte>(segment.Array!, segment.Offset + i, size),
+                    WebSocketMessageType.Text,
+                    endOfMessage,
+                    cancellationToken);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely, ex);
+        }
+    }
+    
     private static async Task SendConfigurationAsync(
         WebSocket ws,
         string requestId,
@@ -116,56 +306,6 @@ internal static class AzureWSSynthesiser
         await SendWebSocketTextAsync(ws, request, cancellationToken);
     }
 
-    private static async Task<byte[]> ReceiveAudioDataAsync(
-        WebSocket ws,
-        string requestId,
-        CancellationToken cancellationToken)
-    {
-        using var buffer = new MemoryStream();
-        var state = ProtocolState.NotStarted;
-        var receiveBuffer = new byte[BUFFER_SIZE];
-        
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var result = await ws.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
-
-                switch (result.MessageType)
-                {
-                    case WebSocketMessageType.Close:
-                        throw new IOException("Connection closed unexpectedly");
-                    case WebSocketMessageType.Text:
-                    {
-                        var message = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
-                        state = await HandleTextMessageAsync(message, requestId, state);
-
-                        if (state == ProtocolState.Streaming && message.Contains(PathConstants.TURN_END))
-                        {
-                            return buffer.ToArray();
-                        }
-
-                        break;
-                    }
-                    case WebSocketMessageType.Binary:
-                        await HandleBinaryMessageAsync(
-                            new ArraySegment<byte>(receiveBuffer, 0, result.Count).ToArray(),
-                            requestId,
-                            state,
-                            buffer);
-                        state = ProtocolState.Streaming;
-                        break;
-                }
-            }
-        }
-        catch (WebSocketException ex)
-        {
-            throw new IOException("WebSocket communication error", ex);
-        }
-
-        throw new OperationCanceledException();
-    }
-
     private static async Task<ProtocolState> HandleTextMessageAsync(
         string message,
         string requestId,
@@ -205,29 +345,6 @@ internal static class AzureWSSynthesiser
             throw new IOException("Unexpected request id during streaming");
 
         await buffer.WriteAsync(data.AsMemory(2 + headerLen));
-    }
-
-    private static async Task SendWebSocketTextAsync(
-        WebSocket ws,
-        string message,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            if (ws.State != WebSocketState.Open)
-                throw new WebSocketException(WebSocketError.InvalidState);
-
-            var buffer = Encoding.UTF8.GetBytes(message);
-            await ws.SendAsync(
-                new ArraySegment<byte>(buffer),
-                WebSocketMessageType.Text,
-                true,
-                cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely, ex);
-        }
     }
 
     private static async Task SafeCloseWebSocketAsync(WebSocket ws)
