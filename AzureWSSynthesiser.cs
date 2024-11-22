@@ -5,11 +5,17 @@ namespace EdgeTTS;
 
 internal static class AzureWSSynthesiser
 {
-    private const string SPEECH_CONFIG_PATH = "Path:speech.config";
-    private const string SSML_PATH = "Path:ssml";
-    private const string TURN_START_PATH = "Path:turn.start";
-    private const string TURN_END_PATH = "Path:turn.end";
-    private const string AUDIO_PATH = "Path:audio";
+    private const int WEBSOCKET_TIMEOUT_MS = 10000;
+    private const int BUFFER_SIZE = 4096;
+
+    private static class PathConstants
+    {
+        public const string SPEECH_CONFIG = "Path:speech.config";
+        public const string SSML = "Path:ssml";
+        public const string TURN_START = "Path:turn.start";
+        public const string TURN_END = "Path:turn.end";
+        public const string AUDIO = "Path:audio";
+    }
 
     private enum ProtocolState
     {
@@ -30,18 +36,35 @@ internal static class AzureWSSynthesiser
         int styleDegree = 100,
         string? role = null)
     {
+        ArgumentNullException.ThrowIfNull(ws);
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(voice);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(WEBSOCKET_TIMEOUT_MS);
+
         var requestId = Guid.NewGuid().ToString("N");
-        var timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffK");
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffK");
 
         try
         {
-            await SendConfigurationAsync(ws, requestId, timestamp, cancellationToken);
-            await SendSpeechRequestAsync(ws, requestId, timestamp, text, speed, pitch, volume, voice, style,
-                                         styleDegree, role, cancellationToken);
+            // 确保 WebSocket 状态正常
+            if (ws.State != WebSocketState.Open)
+            {
+                throw new WebSocketException(WebSocketError.InvalidState, "WebSocket connection is not open");
+            }
 
-            return await ReceiveAudioDataAsync(ws, requestId, cancellationToken);
+            await SendConfigurationAsync(ws, requestId, timestamp, timeoutCts.Token);
+            await SendSpeechRequestAsync(ws, requestId, timestamp, text, speed, pitch, volume, voice, style,
+                                     styleDegree, role, timeoutCts.Token);
+
+            return await ReceiveAudioDataAsync(ws, requestId, timeoutCts.Token);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("Synthesis operation timed out");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             await SafeCloseWebSocketAsync(ws);
             throw new IOException("Synthesis failed", ex);
@@ -49,17 +72,19 @@ internal static class AzureWSSynthesiser
     }
 
     private static async Task SendConfigurationAsync(
-        WebSocket ws, string requestId, string timestamp, CancellationToken cancellationToken)
+        WebSocket ws,
+        string requestId,
+        string timestamp,
+        CancellationToken cancellationToken)
     {
         var config = new StringBuilder()
-                     .AppendLine($"{SPEECH_CONFIG_PATH}")
-                     .AppendLine($"X-RequestId:{requestId}")
-                     .AppendLine($"X-Timestamp:{timestamp}")
-                     .AppendLine("Content-Type:application/json")
-                     .AppendLine()
-                     .AppendLine(
-                         "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}")
-                     .ToString();
+            .AppendLine(PathConstants.SPEECH_CONFIG)
+            .AppendLine($"X-RequestId:{requestId}")
+            .AppendLine($"X-Timestamp:{timestamp}")
+            .AppendLine("Content-Type:application/json")
+            .AppendLine()
+            .AppendLine("""{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}""")
+            .ToString();
 
         await SendWebSocketTextAsync(ws, config, cancellationToken);
     }
@@ -80,83 +105,129 @@ internal static class AzureWSSynthesiser
     {
         var ssml = CreateSSML(text, speed, pitch, volume, voice, style, styleDegree, role);
         var request = new StringBuilder()
-                      .AppendLine($"{SSML_PATH}")
-                      .AppendLine($"X-RequestId:{requestId}")
-                      .AppendLine($"X-Timestamp:{timestamp}")
-                      .AppendLine("Content-Type:application/ssml+xml")
-                      .AppendLine()
-                      .AppendLine(ssml)
-                      .ToString();
+            .AppendLine(PathConstants.SSML)
+            .AppendLine($"X-RequestId:{requestId}")
+            .AppendLine($"X-Timestamp:{timestamp}")
+            .AppendLine("Content-Type:application/ssml+xml")
+            .AppendLine()
+            .AppendLine(ssml)
+            .ToString();
 
         await SendWebSocketTextAsync(ws, request, cancellationToken);
     }
 
-    private static async Task<byte[]> ReceiveAudioDataAsync(WebSocket ws, string requestId, CancellationToken cancellationToken)
+    private static async Task<byte[]> ReceiveAudioDataAsync(
+        WebSocket ws,
+        string requestId,
+        CancellationToken cancellationToken)
     {
-        using var session = new WebSocketHelper.WebSocketSession(ws);
         using var buffer = new MemoryStream();
         var state = ProtocolState.NotStarted;
-
-        while (!cancellationToken.IsCancellationRequested)
+        var receiveBuffer = new byte[BUFFER_SIZE];
+        
+        try
         {
-            var message = await session.ReceiveNextMessageAsync(cancellationToken);
-
-            switch (message.Type)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                case WebSocketMessageType.Text:
-                    state = await HandleTextMessageAsync(message.MessageStr, requestId, state);
-                    if (state == ProtocolState.Streaming && message.MessageStr.Contains(TURN_END_PATH))
+                var result = await ws.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
+
+                switch (result.MessageType)
+                {
+                    case WebSocketMessageType.Close:
+                        throw new IOException("Connection closed unexpectedly");
+                    case WebSocketMessageType.Text:
                     {
-                        return buffer.ToArray();
+                        var message = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
+                        state = await HandleTextMessageAsync(message, requestId, state);
+
+                        if (state == ProtocolState.Streaming && message.Contains(PathConstants.TURN_END))
+                        {
+                            return buffer.ToArray();
+                        }
+
+                        break;
                     }
-                    break;
-
-                case WebSocketMessageType.Binary:
-                    await HandleBinaryMessageAsync(message.MessageBinary, requestId, state, buffer);
-                    state = ProtocolState.Streaming;
-                    break;
-
-                case WebSocketMessageType.Close:
-                    throw new IOException("Connection closed unexpectedly");
+                    case WebSocketMessageType.Binary:
+                        await HandleBinaryMessageAsync(
+                            new ArraySegment<byte>(receiveBuffer, 0, result.Count).ToArray(),
+                            requestId,
+                            state,
+                            buffer);
+                        state = ProtocolState.Streaming;
+                        break;
+                }
             }
+        }
+        catch (WebSocketException ex)
+        {
+            throw new IOException("WebSocket communication error", ex);
         }
 
         throw new OperationCanceledException();
     }
 
-    private static async Task<ProtocolState> HandleTextMessageAsync(string message, string requestId, ProtocolState state)
+    private static async Task<ProtocolState> HandleTextMessageAsync(
+        string message,
+        string requestId,
+        ProtocolState state)
     {
-        if (!message.Contains(requestId)) return state;
+        if (!message.Contains(requestId))
+            return state;
 
         return state switch
         {
-            ProtocolState.NotStarted when message.Contains(TURN_START_PATH) => ProtocolState.TurnStarted,
-            ProtocolState.TurnStarted when message.Contains(TURN_END_PATH) =>
+            ProtocolState.NotStarted when message.Contains(PathConstants.TURN_START) => ProtocolState.TurnStarted,
+            ProtocolState.TurnStarted when message.Contains(PathConstants.TURN_END) =>
                 throw new IOException("Unexpected turn.end"),
-            ProtocolState.Streaming when message.Contains(TURN_END_PATH) => state,
+            ProtocolState.Streaming when message.Contains(PathConstants.TURN_END) => state,
             _ => state
         };
     }
 
     private static async Task HandleBinaryMessageAsync(
-        byte[] data, string requestId, ProtocolState state, MemoryStream buffer)
+        byte[] data,
+        string requestId,
+        ProtocolState state,
+        MemoryStream buffer)
     {
-        if (data.Length < 2) throw new IOException("Message too short");
+        if (data.Length < 2)
+            throw new IOException("Message too short");
 
-        var headerLen = (data[0] << 8) + data[1];
-        if (data.Length < 2 + headerLen) throw new IOException("Message too short");
+        var headerLen = BitConverter.ToUInt16([data[1], data[0]], 0);
+        if (data.Length < 2 + headerLen)
+            throw new IOException("Message too short");
 
         var header = Encoding.UTF8.GetString(data, 2, headerLen);
-        if (!header.EndsWith($"{AUDIO_PATH}\r\n")) return;
-        if (!header.Contains(requestId)) throw new IOException("Unexpected request id during streaming");
+        if (!header.EndsWith($"{PathConstants.AUDIO}\r\n"))
+            return;
+
+        if (!header.Contains(requestId))
+            throw new IOException("Unexpected request id during streaming");
 
         await buffer.WriteAsync(data.AsMemory(2 + headerLen));
     }
 
-    private static async Task SendWebSocketTextAsync(WebSocket ws, string message, CancellationToken cancellationToken)
+    private static async Task SendWebSocketTextAsync(
+        WebSocket ws,
+        string message,
+        CancellationToken cancellationToken)
     {
-        var buffer = Encoding.UTF8.GetBytes(message);
-        await ws.SendAsync(buffer, WebSocketMessageType.Text, true, cancellationToken);
+        try
+        {
+            if (ws.State != WebSocketState.Open)
+                throw new WebSocketException(WebSocketError.InvalidState);
+
+            var buffer = Encoding.UTF8.GetBytes(message);
+            await ws.SendAsync(
+                new ArraySegment<byte>(buffer),
+                WebSocketMessageType.Text,
+                true,
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely, ex);
+        }
     }
 
     private static async Task SafeCloseWebSocketAsync(WebSocket ws)
@@ -164,12 +235,22 @@ internal static class AzureWSSynthesiser
         try
         {
             if (ws.State == WebSocketState.Open)
-                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Synthesis completed", CancellationToken.None);
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await ws.CloseAsync(
+                    WebSocketCloseStatus.NormalClosure,
+                    "Synthesis completed",
+                    cts.Token);
+            }
         }
-        catch { ws.Abort(); } finally { ws.Dispose(); }
+        catch
+        {
+            try { ws.Abort(); }
+            catch { /* ignored */ }
+        }
     }
 
-    public static string CreateSSML(
+    private static string CreateSSML(
         string text,
         int speed,
         int pitch,
@@ -182,21 +263,21 @@ internal static class AzureWSSynthesiser
         var expressAs = BuildExpressAs(text, style, styleDegree, role);
 
         return new StringBuilder()
-               .Append(
-                   "<speak xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" version=\"1.0\" xml:lang=\"en-US\">")
-               .Append($"<voice name=\"{voice}\">")
-               .Append(
-                   $"<prosody rate=\"{speed - 100}%\" pitch=\"{(pitch - 100) / 2}%\" volume=\"{volume.Clamp(1, 100)}\">")
-               .Append(expressAs)
-               .Append("</prosody></voice></speak>")
-               .ToString();
+            .Append("<speak xmlns=\"http://www.w3.org/2001/10/synthesis\" xmlns:mstts=\"http://www.w3.org/2001/mstts\" version=\"1.0\" xml:lang=\"en-US\">")
+            .Append($"<voice name=\"{voice}\">")
+            .Append($"<prosody rate=\"{speed - 100}%\" pitch=\"{(pitch - 100) / 2}%\" volume=\"{Math.Clamp(volume, 1, 100)}\">")
+            .Append(expressAs)
+            .Append("</prosody></voice></speak>")
+            .ToString();
     }
 
     private static string BuildExpressAs(string text, string? style, int styleDegree, string? role)
     {
         if (style == "general" || role == "Default" ||
             (string.IsNullOrWhiteSpace(style) && string.IsNullOrWhiteSpace(role)))
+        {
             return text;
+        }
 
         var sb = new StringBuilder("<mstts:express-as");
 
@@ -206,7 +287,10 @@ internal static class AzureWSSynthesiser
               .Append($" styledegree=\"{Math.Max(1, styleDegree) / 100.0f}\"");
         }
 
-        if (!string.IsNullOrWhiteSpace(role)) sb.Append($" role=\"{role}\"");
+        if (!string.IsNullOrWhiteSpace(role))
+        {
+            sb.Append($" role=\"{role}\"");
+        }
 
         return sb.Append('>')
                  .Append(text)
