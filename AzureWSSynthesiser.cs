@@ -7,7 +7,7 @@ internal static class AzureWSSynthesiser
 {
     private const int WEBSOCKET_TIMEOUT_MS = 15000;
     private const int BUFFER_SIZE          = 4096;
-    private const int MAX_RETRIES          = 3;
+    private const int MAX_RETRIES          = 9;
     private const int RETRY_DELAY_MS       = 1000;
 
     private static class PathConstants
