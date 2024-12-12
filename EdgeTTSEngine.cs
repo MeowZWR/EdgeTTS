@@ -1,4 +1,3 @@
-using System;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security;
@@ -48,9 +47,12 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         ThrowIfDisposed();
         try
         {
-            Task.Run(() => SpeakAsync(text, settings), _operationCts.Token).GetAwaiter().GetResult();
+            Task.Run(() => SpeakAsync(text, settings), _operationCts.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // ignored
+        }
     }
 
     public async Task SpeakAsync(string text, EdgeTTSSettings settings)
@@ -97,9 +99,10 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
             }
             catch (Exception ex) when (IsConnectionResetError(ex) && retry < 2)
             {
-                continue;
+                // ignored
             }
         }
+        
         return null;
     }
 
@@ -144,16 +147,13 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         ex?.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset } ||
         ex is SocketException { SocketErrorCode: SocketError.ConnectionReset };
 
-    private static string ComputeHash(string input)
-    {
-        using var sha1 = SHA1.Create();
-        return sha1.ComputeHash(Encoding.UTF8.GetBytes(input)).ToBase36String();
-    }
+    private static string ComputeHash(string input) 
+        => SHA1.HashData(Encoding.UTF8.GetBytes(input)).ToBase36String();
 
     private void ThrowIfDisposed()
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(EdgeTTSEngine));
+        if (!_disposed) return;
+        throw new ObjectDisposedException(nameof(EdgeTTSEngine));
     }
 
     public void Stop()

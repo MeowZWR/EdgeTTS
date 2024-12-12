@@ -42,7 +42,7 @@ internal static class AzureWSSynthesiser
         ArgumentNullException.ThrowIfNull(text);
         ArgumentNullException.ThrowIfNull(voice);
 
-        int        retryCount    = 0;
+        var        retryCount    = 0;
         Exception? lastException = null;
 
         while (retryCount < MAX_RETRIES)
@@ -60,10 +60,8 @@ internal static class AzureWSSynthesiser
                 lastException = ex;
                 retryCount++;
                 
-                // 等待一段时间后重试
                 await Task.Delay(RETRY_DELAY_MS * retryCount, cancellationToken);
                 
-                // 检查WebSocket状态
                 if (ws.State != WebSocketState.Open)
                 {
                     throw new InvalidOperationException(
@@ -79,7 +77,7 @@ internal static class AzureWSSynthesiser
     {
         return ex switch
         {
-            IOException ioEx        => true,
+            IOException             => true,
             WebSocketException wsEx => wsEx.WebSocketErrorCode != WebSocketError.InvalidState,
             _                       => false
         };
@@ -107,7 +105,6 @@ internal static class AzureWSSynthesiser
                 throw new WebSocketException(WebSocketError.InvalidState, "WebSocket connection is not open");
             }
 
-            // 创建一个信号量来控制发送操作
             using var sendLock = new SemaphoreSlim(1, 1);
             
             await SendWithRetryAsync(() => 
@@ -131,7 +128,7 @@ internal static class AzureWSSynthesiser
         SemaphoreSlim sendLock,
         CancellationToken cancellationToken)
     {
-        int attempts = 0;
+        var attempts = 0;
         while (attempts < 2) // 最多重试一次
         {
             try
@@ -143,7 +140,7 @@ internal static class AzureWSSynthesiser
             catch (Exception ex) when (ex is IOException or WebSocketException && attempts == 0)
             {
                 attempts++;
-                await Task.Delay(500, cancellationToken); // 短暂延迟后重试
+                await Task.Delay(500, cancellationToken);
             }
             finally
             {
@@ -181,45 +178,43 @@ internal static class AzureWSSynthesiser
                     throw;
                 }
 
-                if (result.MessageType == WebSocketMessageType.Close)
+                switch (result.MessageType)
                 {
-                    if (buffer.Length > 0 && state == ProtocolState.Streaming)
-                    {
+                    case WebSocketMessageType.Close when buffer.Length > 0 && state == ProtocolState.Streaming:
                         return buffer.ToArray();
-                    }
-                    throw new IOException("Connection closed unexpectedly");
-                }
-
-                if (result.MessageType == WebSocketMessageType.Text)
-                {
-                    var message = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
-                    state = await HandleTextMessageAsync(message, requestId, state);
-
-                    if (state == ProtocolState.Streaming && message.Contains(PathConstants.TURN_END))
+                    case WebSocketMessageType.Close:
+                        throw new IOException("Connection closed unexpectedly");
+                    case WebSocketMessageType.Text:
                     {
-                        return buffer.ToArray();
+                        var message = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
+                        state = await HandleTextMessageAsync(message, requestId, state);
+
+                        if (state == ProtocolState.Streaming && message.Contains(PathConstants.TURN_END))
+                            return buffer.ToArray();
+
+                        break;
                     }
-                }
-                else if (result.MessageType == WebSocketMessageType.Binary)
-                {
-                    messageBuffer.AddRange(new ArraySegment<byte>(receiveBuffer, 0, result.Count));
+                    case WebSocketMessageType.Binary:
+                    {
+                        messageBuffer.AddRange(new ArraySegment<byte>(receiveBuffer, 0, result.Count));
                     
-                    if (result.EndOfMessage)
-                    {
-                        await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, state, buffer);
-                        state = ProtocolState.Streaming;
-                        messageBuffer.Clear();
+                        if (result.EndOfMessage)
+                        {
+                            await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, state, buffer);
+                            state = ProtocolState.Streaming;
+                            messageBuffer.Clear();
+                        }
+
+                        break;
                     }
                 }
             }
         }
-        catch (Exception ex) when (ex is WebSocketException || ex is IOException)
+        catch (Exception ex) when (ex is WebSocketException or IOException)
         {
             if (buffer.Length > 0 && state == ProtocolState.Streaming)
-            {
-                // 如果已经收到了音频数据，返回部分数据而不是抛出异常
                 return buffer.ToArray();
-            }
+            
             throw;
         }
 
@@ -238,15 +233,14 @@ internal static class AzureWSSynthesiser
                 throw new WebSocketException(WebSocketError.InvalidState);
             }
 
-            byte[] buffer = Encoding.UTF8.GetBytes(message);
+            var buffer = Encoding.UTF8.GetBytes(message);
             var segment = new ArraySegment<byte>(buffer);
 
-            // 分块发送大消息
             const int chunkSize = 4096;
-            for (int i = 0; i < segment.Count; i += chunkSize)
+            for (var i = 0; i < segment.Count; i += chunkSize)
             {
-                int size = Math.Min(chunkSize, segment.Count - i);
-                bool endOfMessage = (i + size) >= segment.Count;
+                var size = Math.Min(chunkSize, segment.Count - i);
+                var endOfMessage = (i + size) >= segment.Count;
                 
                 await ws.SendAsync(
                     new ArraySegment<byte>(segment.Array!, segment.Offset + i, size),
