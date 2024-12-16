@@ -197,7 +197,7 @@ internal static class AzureWSSynthesiser
                     
                         if (result.EndOfMessage)
                         {
-                            await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, state, buffer);
+                            await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, buffer);
                             state = ProtocolState.Streaming;
                             messageBuffer.Clear();
                         }
@@ -318,7 +318,6 @@ internal static class AzureWSSynthesiser
     private static async Task HandleBinaryMessageAsync(
         byte[] data,
         string requestId,
-        ProtocolState state,
         MemoryStream buffer)
     {
         if (data.Length < 2)
