@@ -168,13 +168,10 @@ internal static class AzureWSSynthesiser
                 {
                     result = await ws.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
                 }
-                catch (WebSocketException ex)
+                catch (WebSocketException)
                 {
                     if (buffer.Length > 0 && state == ProtocolState.Streaming)
-                    {
-                        // 如果已经收到了一些音频数据，尝试返回已收到的数据
                         return buffer.ToArray();
-                    }
                     throw;
                 }
 
@@ -300,22 +297,22 @@ internal static class AzureWSSynthesiser
         await SendWebSocketTextAsync(ws, request, cancellationToken);
     }
 
-    private static async Task<ProtocolState> HandleTextMessageAsync(
+    private static Task<ProtocolState> HandleTextMessageAsync(
         string message,
         string requestId,
         ProtocolState state)
     {
         if (!message.Contains(requestId))
-            return state;
+            return Task.FromResult(state);
 
-        return state switch
+        return Task.FromResult(state switch
         {
             ProtocolState.NotStarted when message.Contains(PathConstants.TURN_START) => ProtocolState.TurnStarted,
             ProtocolState.TurnStarted when message.Contains(PathConstants.TURN_END) =>
                 throw new IOException("Unexpected turn.end"),
             ProtocolState.Streaming when message.Contains(PathConstants.TURN_END) => state,
-            _ => state
-        };
+            _                                                                     => state
+        });
     }
 
     private static async Task HandleBinaryMessageAsync(

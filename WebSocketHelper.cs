@@ -150,7 +150,7 @@ internal static class WebSocketHelper
         }
     }
 
-    public static async Task<bool> IsConnectedAsync(this WebSocket webSocket) => webSocket.State == WebSocketState.Open;
+    public static Task<bool> IsConnectedAsync(this WebSocket webSocket) => Task.FromResult(webSocket.State == WebSocketState.Open);
 
     public static async Task SafeCloseAsync(
         this WebSocket webSocket,
