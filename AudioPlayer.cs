@@ -42,7 +42,7 @@ public class AudioPlayer : IAsyncDisposable
     public static async Task PlayAudioAsync(string filePath, int timeoutSeconds = 10, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(filePath))
-            throw new ArgumentException(@"Path is null or empty", nameof(filePath));
+            throw new ArgumentException("Path is null or empty", nameof(filePath));
 
         if (!File.Exists(filePath))
             throw new FileNotFoundException("Audio file not found", filePath);

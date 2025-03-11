@@ -9,8 +9,8 @@ namespace EdgeTTS;
 public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
 {
     private const string WSS_URL = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-    private readonly CancellationTokenSource _operationCts = new();
-    private bool _disposed;
+    private readonly CancellationTokenSource operationCts = new();
+    private bool disposed;
 
     public static readonly Voice[] Voices =
     [
@@ -45,7 +45,7 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         ThrowIfDisposed();
         try
         {
-            Task.Run(() => SpeakAsync(text, settings), _operationCts.Token).ConfigureAwait(false);
+            Task.Run(() => SpeakAsync(text, settings), operationCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -63,6 +63,15 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         {
             await AudioPlayer.PlayAudioAsync(audioFile);
         }
+    }
+
+    public async Task<string> GetAudioFileAsync(string text, EdgeTTSSettings settings)
+    {
+        ThrowIfDisposed();
+        var safeText  = SecurityElement.Escape(text.Replace('：', ':'));
+        var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
+
+        return audioFile;
     }
 
     private async Task<string> GetOrCreateAudioFileAsync(string text, EdgeTTSSettings settings)
@@ -91,7 +100,7 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
             {
                 using var ws = await CreateWebSocketAsync();
                 return await AzureWSSynthesiser.SynthesisAsync(
-                    ws, _operationCts.Token, text,
+                    ws, operationCts.Token, text,
                     settings.Speed, settings.Pitch,
                     settings.Volume, settings.Voice);
             }
@@ -108,7 +117,7 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
     {
         var ws = SystemClientWebSocket.CreateClientWebSocket();
         ConfigureWebSocket(ws);
-        await ws.ConnectAsync(new Uri($"{WSS_URL}&Sec-MS-GEC={Sec_MS_GEC.Get()}&Sec-MS-GEC-Version=1-132.0.2917.0"), _operationCts.Token);
+        await ws.ConnectAsync(new($"{WSS_URL}&Sec-MS-GEC={SecMSGEC.Get()}&Sec-MS-GEC-Version=1-132.0.2917.0"), operationCts.Token);
         return ws;
     }
 
@@ -135,24 +144,23 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
 
     private void ThrowIfDisposed()
     {
-        if (!_disposed) return;
+        if (!disposed) return;
         throw new ObjectDisposedException(nameof(EdgeTTSEngine));
     }
 
     public void Stop()
     {
-        if (!_disposed)
-            _operationCts.Cancel();
+        if (!disposed)
+            operationCts.Cancel();
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (disposed) return;
 
-        _operationCts.Cancel();
-        _operationCts.Dispose();
+        operationCts.Cancel();
+        operationCts.Dispose();
 
-        _disposed = true;
-        GC.SuppressFinalize(this);
+        disposed = true;
     }
 }
