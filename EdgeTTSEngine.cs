@@ -1,19 +1,18 @@
 using System.Diagnostics;
-using System.Net.Sockets;
-using System.Net.WebSockets;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 
 namespace EdgeTTS;
 
-public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler = null) : IDisposable
+public sealed class EdgeTTSEngine : IDisposable
 {
-    private const string WSS_URL =
-        "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
     private readonly CancellationTokenSource operationCts = new();
     private          bool                    disposed;
 
+    /// <summary>
+    /// 所有可用的语音列表
+    /// </summary>
     public static readonly Voice[] Voices =
     [
         new("zh-CN-XiaoxiaoNeural", "晓晓 (中文-普通话-女)"),
@@ -41,12 +40,23 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         new("en-US-SteffanNeural", "Steffan (English-American-Male)"),
         new("en-GB-SoniaNeural", "Sonia (English-Britain-Female)"),
     ];
-
-    private void Log(string message)
+    
+    /// <param name="cacheFolder">缓存文件夹路径，用于存储生成的音频文件</param>
+    /// <param name="logHandler">日志处理函数，用于接收引擎运行时的日志信息</param>
+    public EdgeTTSEngine(string cacheFolder, Action<string>? logHandler = null)
     {
-        logHandler?.Invoke($"[EdgeTTS] {message}]");
+        this.cacheFolder = cacheFolder;
+        this.logHandler = logHandler;
     }
 
+    private readonly string cacheFolder;
+    private readonly Action<string>? logHandler;
+
+    /// <summary>
+    /// 同步播放指定文本的语音
+    /// </summary>
+    /// <param name="text">要转换为语音的文本</param>
+    /// <param name="settings">语音合成设置</param>
     public void Speak(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
@@ -60,6 +70,12 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         }
     }
 
+    /// <summary>
+    /// 异步播放指定文本的语音
+    /// </summary>
+    /// <param name="text">要转换为语音的文本</param>
+    /// <param name="settings">语音合成设置</param>
+    /// <returns>表示异步操作的任务</returns>
     public async Task SpeakAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
@@ -68,11 +84,41 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// 获取指定文本的音频文件路径, 可用于预先合成指定的文本音频
+    /// </summary>
+    /// <param name="text">要转换为语音的文本</param>
+    /// <param name="settings">语音合成设置</param>
+    /// <returns>音频文件的完整路径</returns>
     public async Task<string> GetAudioFileAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
         var audioFile = await GetOrCreateAudioFileAsync(text, settings);
         return audioFile;
+    }
+
+    /// <summary>
+    /// 停止当前正在进行的语音合成或播放操作
+    /// </summary>
+    public void Stop()
+    {
+        if (!disposed)
+            operationCts.Cancel();
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+
+        operationCts.Cancel();
+        operationCts.Dispose();
+
+        disposed = true;
+    }
+
+    private void Log(string message)
+    {
+        logHandler?.Invoke($"[EdgeTTS] {message}]");
     }
 
     private async Task<string> GetOrCreateAudioFileAsync(string text, EdgeTTSSettings settings)
@@ -127,11 +173,11 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         {
             try
             {
-                using var ws = await CreateWebSocketAsync().ConfigureAwait(false);
+                using var ws = await EdgeTTSWebSocket.CreateWebSocketAsync(operationCts.Token).ConfigureAwait(false);
                 return await AzureWSSynthesiser.SynthesisAsync(ws, operationCts.Token, text, settings.Speed, settings.Pitch, 100, settings.Voice)
                                                .ConfigureAwait(false);
             }
-            catch (Exception ex) when (IsConnectionResetError(ex) && retry < 9)
+            catch (Exception ex) when (EdgeTTSWebSocket.IsConnectionResetError(ex) && retry < 9)
             {
                 Log($"语音合成失败, 正在重试 ({retry + 1}/10): {ex.Message}");
                 await Task.Delay(1000 * (retry + 1)).ConfigureAwait(false);
@@ -142,33 +188,6 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         return null;
     }
 
-    private async Task<WebSocket> CreateWebSocketAsync()
-    {
-        var ws = SystemClientWebSocket.CreateClientWebSocket();
-        ConfigureWebSocket(ws);
-        await ws.ConnectAsync(new($"{WSS_URL}&Sec-MS-GEC={SecMSGEC.Get()}&Sec-MS-GEC-Version=1-132.0.2917.0"), operationCts.Token)
-                .ConfigureAwait(false);
-        return ws;
-    }
-
-    private static void ConfigureWebSocket(WebSocket ws)
-    {
-        dynamic options = ws switch
-        {
-            ClientWebSocket clientWs => clientWs.Options,
-            System.Net.WebSockets.Managed.ClientWebSocket managedWs => managedWs.Options,
-            _ => throw new ArgumentException("Unsupported WebSocket type")
-        };
-
-        options.SetRequestHeader("Accept-Encoding", "gzip, deflate, br");
-        options.SetRequestHeader("Cache-Control", "no-cache");
-        options.SetRequestHeader("Pragma", "no-cache");
-    }
-
-    private static bool IsConnectionResetError(Exception? ex) =>
-        ex?.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset } ||
-        ex is SocketException { SocketErrorCode: SocketError.ConnectionReset };
-
     private static string ComputeHash(string input) 
         => SHA1.HashData(Encoding.UTF8.GetBytes(input)).ToBase36String();
 
@@ -176,21 +195,5 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
     {
         if (!disposed) return;
         throw new ObjectDisposedException(nameof(EdgeTTSEngine));
-    }
-
-    public void Stop()
-    {
-        if (!disposed)
-            operationCts.Cancel();
-    }
-
-    public void Dispose()
-    {
-        if (disposed) return;
-
-        operationCts.Cancel();
-        operationCts.Dispose();
-
-        disposed = true;
     }
 }
