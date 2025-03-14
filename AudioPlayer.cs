@@ -57,7 +57,7 @@ public class AudioPlayer : IAsyncDisposable
 
     private void SetVolume(int volume)
     {
-        var normalizedVolume = Math.Clamp(volume, 0, 100) / 100f;
+        var normalizedVolume = Math.Clamp(volume, 0, 100) / 50f;
         audioFile.Volume = normalizedVolume;
     }
 
@@ -100,9 +100,14 @@ public class AudioPlayer : IAsyncDisposable
     }
 }
 
-public class PlayStateChangedEventArgs(WMPPlayState playState) : EventArgs
+public class PlayStateChangedEventArgs : EventArgs
 {
-    public WMPPlayState PlayState { get; } = playState;
+    public WMPPlayState PlayState { get; }
+
+    public PlayStateChangedEventArgs(WMPPlayState playState)
+    {
+        PlayState = playState;
+    }
 }
 
 public enum WMPPlayState

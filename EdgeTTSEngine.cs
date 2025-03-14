@@ -118,10 +118,8 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
             try
             {
                 using var ws = await CreateWebSocketAsync().ConfigureAwait(false);
-                return await AzureWSSynthesiser.SynthesisAsync(
-                    ws, operationCts.Token, text,
-                    settings.Speed, settings.Pitch,
-                    settings.Volume, settings.Voice).ConfigureAwait(false);
+                return await AzureWSSynthesiser.SynthesisAsync(ws, operationCts.Token, text, settings.Speed, settings.Pitch, 100, settings.Voice)
+                                               .ConfigureAwait(false);
             }
             catch (Exception ex) when (IsConnectionResetError(ex) && retry < 9)
             {
