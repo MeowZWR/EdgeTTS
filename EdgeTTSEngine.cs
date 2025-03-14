@@ -118,7 +118,7 @@ public sealed class EdgeTTSEngine : IDisposable
 
     private void Log(string message)
     {
-        logHandler?.Invoke($"[EdgeTTS] {message}]");
+        logHandler?.Invoke($"[EdgeTTS] {message}");
     }
 
     private async Task<string> GetOrCreateAudioFileAsync(string text, EdgeTTSSettings settings)
