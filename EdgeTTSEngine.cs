@@ -8,10 +8,9 @@ namespace EdgeTTS;
 
 public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler = null) : IDisposable
 {
-    private const string WSS_URL = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+    private const    string                  WSS_URL      = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
     private readonly CancellationTokenSource operationCts = new();
-    private readonly Action<string>? logHandler;
-    private bool disposed;
+    private          bool                    disposed;
 
     public static readonly Voice[] Voices =
     [
@@ -41,11 +40,6 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         new("en-GB-SoniaNeural", "Sonia (English-Britain-Female)"),
     ];
 
-    public EdgeTTSEngine(string cacheFolder)
-    {
-        this.logHandler = null;
-    }
-
     private void Log(string message)
     {
         logHandler?.Invoke(message);
@@ -56,7 +50,7 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         ThrowIfDisposed();
         try
         {
-            Task.Run(() => SpeakAsync(text, settings), operationCts.Token).ConfigureAwait(false);
+            Task.Run(async () => await SpeakAsync(text, settings).ConfigureAwait(false), operationCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -71,19 +65,18 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
 
         if (!string.IsNullOrWhiteSpace(audioFile))
-        {
-            var startTime = DateTime.Now;
             await AudioPlayer.PlayAudioAsync(audioFile);
-            var duration = DateTime.Now - startTime;
-            Log($"语音合成完成，耗时: {duration.TotalMilliseconds:F2}ms");
-        }
     }
 
     public async Task<string> GetAudioFileAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
         var safeText  = SecurityElement.Escape(text.Replace('：', ':'));
+        
+        var startTime = DateTime.Now;
         var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
+        var duration  = DateTime.Now - startTime;
+        Log($"语音合成完成, 耗时: {duration.TotalMilliseconds:F2}ms");
 
         return audioFile;
     }
@@ -95,13 +88,15 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
 
         if (!File.Exists(cacheFile))
         {
-            Directory.CreateDirectory(cacheFolder);
-            Log($"开始合成语音: {text}");
+            if (!Directory.Exists(cacheFolder))
+                Directory.CreateDirectory(cacheFolder);
+            
+            Log("开始合成语音");
             var content = await SynthesizeWithRetryAsync(settings, text);
             if (content != null)
             {
                 await File.WriteAllBytesAsync(cacheFile, content);
-                Log($"语音合成完成，已保存到缓存: {cacheFile}");
+                Log($"语音合成完成, 已保存到缓存: {cacheFile}");
             }
         }
         else
@@ -126,12 +121,12 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
             }
             catch (Exception ex) when (IsConnectionResetError(ex) && retry < 9)
             {
-                Log($"语音合成失败，正在重试 ({retry + 1}/10): {ex.Message}");
+                Log($"语音合成失败, 正在重试 ({retry + 1}/10): {ex.Message}");
                 await Task.Delay(1000 * (retry + 1));
             }
         }
 
-        Log("语音合成失败，已达到最大重试次数");
+        Log("语音合成失败, 已达到最大重试次数");
         return null;
     }
 
