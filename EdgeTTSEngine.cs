@@ -63,23 +63,22 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
     public async Task SpeakAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
-        var safeText = SecurityElement.Escape(text.Replace('：', ':'));
-        var audioFile = await GetOrCreateAudioFileAsync(safeText, settings).ConfigureAwait(false);
-
-        if (!string.IsNullOrWhiteSpace(audioFile))
-            await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume).ConfigureAwait(false);
+        var audioFile = await GetOrCreateAudioFileAsync(text, settings).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(audioFile)) return;
+        await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume).ConfigureAwait(false);
     }
 
     public async Task<string> GetAudioFileAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
-        var safeText  = SecurityElement.Escape(text.Replace('：', ':'));
-        var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
+        var audioFile = await GetOrCreateAudioFileAsync(text, settings);
         return audioFile;
     }
 
     private async Task<string> GetOrCreateAudioFileAsync(string text, EdgeTTSSettings settings)
     {
+        text = SanitizeString(text, settings);
+        
         var hash = ComputeHash($"EdgeTTS.{text}.{settings}")[..10];
         var cacheFile = Path.Combine(cacheFolder, $"{hash}.mp3");
 
@@ -109,6 +108,17 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         }
 
         return cacheFile;
+    }
+    
+    private static string SanitizeString(string text, EdgeTTSSettings settings)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        
+        foreach (var (word, phoneme) in settings.PhonemeReplacements)
+            text = text.Replace(word, phoneme);
+        
+        var safeText = SecurityElement.Escape(text.Replace('：', ':'));
+        return safeText;
     }
 
     private async Task<byte[]?> SynthesizeWithRetryAsync(EdgeTTSSettings settings, string text)
