@@ -6,10 +6,11 @@ using System.Text;
 
 namespace EdgeTTS;
 
-public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
+public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler = null) : IDisposable
 {
     private const string WSS_URL = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
     private readonly CancellationTokenSource operationCts = new();
+    private readonly Action<string>? logHandler;
     private bool disposed;
 
     public static readonly Voice[] Voices =
@@ -40,6 +41,16 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         new("en-GB-SoniaNeural", "Sonia (English-Britain-Female)"),
     ];
 
+    public EdgeTTSEngine(string cacheFolder)
+    {
+        this.logHandler = null;
+    }
+
+    private void Log(string message)
+    {
+        logHandler?.Invoke(message);
+    }
+
     public void Speak(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
@@ -61,7 +72,10 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
 
         if (!string.IsNullOrWhiteSpace(audioFile))
         {
+            var startTime = DateTime.Now;
             await AudioPlayer.PlayAudioAsync(audioFile);
+            var duration = DateTime.Now - startTime;
+            Log($"语音合成完成，耗时: {duration.TotalMilliseconds:F2}ms");
         }
     }
 
@@ -82,11 +96,17 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
         if (!File.Exists(cacheFile))
         {
             Directory.CreateDirectory(cacheFolder);
+            Log($"开始合成语音: {text}");
             var content = await SynthesizeWithRetryAsync(settings, text);
             if (content != null)
             {
                 await File.WriteAllBytesAsync(cacheFile, content);
+                Log($"语音合成完成，已保存到缓存: {cacheFile}");
             }
+        }
+        else
+        {
+            Log($"使用缓存的语音文件: {cacheFile}");
         }
 
         return cacheFile;
@@ -106,10 +126,12 @@ public sealed class EdgeTTSEngine(string cacheFolder) : IDisposable
             }
             catch (Exception ex) when (IsConnectionResetError(ex) && retry < 9)
             {
-                // ignored
+                Log($"语音合成失败，正在重试 ({retry + 1}/10): {ex.Message}");
+                await Task.Delay(1000 * (retry + 1));
             }
         }
 
+        Log("语音合成失败，已达到最大重试次数");
         return null;
     }
 
