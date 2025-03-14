@@ -42,7 +42,7 @@ public class AudioPlayer : IAsyncDisposable
         playbackStarted.TrySetResult(false);
     }
 
-    public static async Task PlayAudioAsync(string filePath, CancellationToken cancellationToken = default)
+    public static async Task PlayAudioAsync(string filePath, int volume = 100, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(filePath))
             throw new ArgumentException("Path is null or empty", nameof(filePath));
@@ -51,7 +51,14 @@ public class AudioPlayer : IAsyncDisposable
             throw new FileNotFoundException("Audio file not found", filePath);
 
         await using var player = new AudioPlayer(filePath);
+        player.SetVolume(volume);
         await player.PlayInternalAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private void SetVolume(int volume)
+    {
+        var normalizedVolume = Math.Clamp(volume, 0, 100) / 100f;
+        audioFile.Volume = normalizedVolume;
     }
 
     private async Task PlayInternalAsync(CancellationToken cancellationToken)
@@ -93,14 +100,9 @@ public class AudioPlayer : IAsyncDisposable
     }
 }
 
-public class PlayStateChangedEventArgs : EventArgs
+public class PlayStateChangedEventArgs(WMPPlayState playState) : EventArgs
 {
-    public WMPPlayState PlayState { get; }
-
-    public PlayStateChangedEventArgs(WMPPlayState playState)
-    {
-        PlayState = playState;
-    }
+    public WMPPlayState PlayState { get; } = playState;
 }
 
 public enum WMPPlayState

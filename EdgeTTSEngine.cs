@@ -67,7 +67,7 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         var audioFile = await GetOrCreateAudioFileAsync(safeText, settings).ConfigureAwait(false);
 
         if (!string.IsNullOrWhiteSpace(audioFile))
-            await AudioPlayer.PlayAudioAsync(audioFile).ConfigureAwait(false);
+            await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume).ConfigureAwait(false);
     }
 
     public async Task<string> GetAudioFileAsync(string text, EdgeTTSSettings settings)
