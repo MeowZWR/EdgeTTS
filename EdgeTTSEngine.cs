@@ -73,10 +73,7 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         ThrowIfDisposed();
         var safeText  = SecurityElement.Escape(text.Replace('：', ':'));
         
-        var startTime = DateTime.Now;
         var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
-        var duration  = DateTime.Now - startTime;
-        Log($"语音合成完成, 耗时: {duration.TotalMilliseconds:F2}ms");
 
         return audioFile;
     }
@@ -95,13 +92,16 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
             var content = await SynthesizeWithRetryAsync(settings, text);
             if (content != null)
             {
+                var startTime = DateTime.Now;
                 await File.WriteAllBytesAsync(cacheFile, content);
-                Log($"语音合成完成, 已保存到缓存: {cacheFile}");
+                var duration  = DateTime.Now - startTime;
+                Log($"语音合成完成, 耗时: {duration.TotalMilliseconds:F2}ms");
+                Log($"已将语音保存到缓存文件: {cacheFile}");
             }
         }
         else
         {
-            Log($"使用缓存的语音文件: {cacheFile}");
+            Log("使用缓存的语音文件");
         }
 
         return cacheFile;
