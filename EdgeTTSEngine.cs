@@ -44,7 +44,7 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
 
     private void Log(string message)
     {
-        logHandler?.Invoke(message);
+        logHandler?.Invoke($"[EdgeTTS] {message}]");
     }
 
     public void Speak(string text, EdgeTTSSettings settings)
