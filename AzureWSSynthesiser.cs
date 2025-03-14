@@ -53,14 +53,14 @@ internal static class AzureWSSynthesiser
                 timeoutCts.CancelAfter(WEBSOCKET_TIMEOUT_MS);
 
                 return await ExecuteSynthesisAsync(
-                           ws, timeoutCts.Token, text, speed, pitch, volume, voice, style, styleDegree, role);
+                           ws, timeoutCts.Token, text, speed, pitch, volume, voice, style, styleDegree, role).ConfigureAwait(false);
             }
             catch (Exception ex) when (ShouldRetry(ex) && retryCount < MAX_RETRIES - 1)
             {
                 lastException = ex;
                 retryCount++;
                 
-                await Task.Delay(RETRY_DELAY_MS * retryCount, cancellationToken);
+                await Task.Delay(RETRY_DELAY_MS * retryCount, cancellationToken).ConfigureAwait(false);
                 
                 if (ws.State != WebSocketState.Open)
                 {
@@ -108,17 +108,17 @@ internal static class AzureWSSynthesiser
             using var sendLock = new SemaphoreSlim(1, 1);
             
             await SendWithRetryAsync(() => 
-                SendConfigurationAsync(ws, requestId, timestamp, cancellationToken), sendLock, cancellationToken);
+                SendConfigurationAsync(ws, requestId, timestamp, cancellationToken), sendLock, cancellationToken).ConfigureAwait(false);
                 
             await SendWithRetryAsync(() => 
                 SendSpeechRequestAsync(ws, requestId, timestamp, text, speed, pitch, volume, 
-                    voice, style, styleDegree, role, cancellationToken), sendLock, cancellationToken);
+                    voice, style, styleDegree, role, cancellationToken), sendLock, cancellationToken).ConfigureAwait(false);
 
-            return await ReceiveAudioDataAsync(ws, requestId, cancellationToken);
+            return await ReceiveAudioDataAsync(ws, requestId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await SafeCloseWebSocketAsync(ws);
+            await SafeCloseWebSocketAsync(ws).ConfigureAwait(false);
             throw;
         }
     }
@@ -133,14 +133,14 @@ internal static class AzureWSSynthesiser
         {
             try
             {
-                await sendLock.WaitAsync(cancellationToken);
-                await sendAction();
+                await sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                await sendAction().ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (ex is IOException or WebSocketException && attempts == 0)
             {
                 attempts++;
-                await Task.Delay(500, cancellationToken);
+                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -166,7 +166,7 @@ internal static class AzureWSSynthesiser
                 WebSocketReceiveResult result;
                 try
                 {
-                    result = await ws.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken);
+                    result = await ws.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), cancellationToken).ConfigureAwait(false);
                 }
                 catch (WebSocketException)
                 {
@@ -184,7 +184,7 @@ internal static class AzureWSSynthesiser
                     case WebSocketMessageType.Text:
                     {
                         var message = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
-                        state = await HandleTextMessageAsync(message, requestId, state);
+                        state = await HandleTextMessageAsync(message, requestId, state).ConfigureAwait(false);
 
                         if (state == ProtocolState.Streaming && message.Contains(PathConstants.TURN_END))
                             return buffer.ToArray();
@@ -197,7 +197,7 @@ internal static class AzureWSSynthesiser
                     
                         if (result.EndOfMessage)
                         {
-                            await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, state, buffer);
+                            await HandleBinaryMessageAsync(messageBuffer.ToArray(), requestId, state, buffer).ConfigureAwait(false);
                             state = ProtocolState.Streaming;
                             messageBuffer.Clear();
                         }
@@ -243,7 +243,7 @@ internal static class AzureWSSynthesiser
                     new ArraySegment<byte>(segment.Array!, segment.Offset + i, size),
                     WebSocketMessageType.Text,
                     endOfMessage,
-                    cancellationToken);
+                    cancellationToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -267,7 +267,7 @@ internal static class AzureWSSynthesiser
             .AppendLine("""{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}""")
             .ToString();
 
-        await SendWebSocketTextAsync(ws, config, cancellationToken);
+        await SendWebSocketTextAsync(ws, config, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task SendSpeechRequestAsync(
@@ -294,7 +294,7 @@ internal static class AzureWSSynthesiser
             .AppendLine(ssml)
             .ToString();
 
-        await SendWebSocketTextAsync(ws, request, cancellationToken);
+        await SendWebSocketTextAsync(ws, request, cancellationToken).ConfigureAwait(false);
     }
 
     private static Task<ProtocolState> HandleTextMessageAsync(
@@ -335,7 +335,7 @@ internal static class AzureWSSynthesiser
         if (!header.Contains(requestId))
             throw new IOException("Unexpected request id during streaming");
 
-        await buffer.WriteAsync(data.AsMemory(2 + headerLen));
+        await buffer.WriteAsync(data.AsMemory(2 + headerLen)).ConfigureAwait(false);
     }
 
     private static async Task SafeCloseWebSocketAsync(WebSocket ws)
@@ -348,7 +348,7 @@ internal static class AzureWSSynthesiser
                 await ws.CloseAsync(
                     WebSocketCloseStatus.NormalClosure,
                     "Synthesis completed",
-                    cts.Token);
+                    cts.Token).ConfigureAwait(false);
             }
         }
         catch

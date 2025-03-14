@@ -41,7 +41,7 @@ public class AudioPlayer : IAsyncDisposable
             throw new FileNotFoundException("Audio file not found", filePath);
 
         await using var player = new AudioPlayer(filePath);
-        await player.PlayInternalAsync(timeoutSeconds, cancellationToken);
+        await player.PlayInternalAsync(timeoutSeconds, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task PlayInternalAsync(int timeoutSeconds, CancellationToken cancellationToken)
@@ -56,7 +56,7 @@ public class AudioPlayer : IAsyncDisposable
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
 
-            await Task.Delay(-1, timeoutCts.Token);
+            await Task.Delay(-1, timeoutCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -77,6 +77,8 @@ public class AudioPlayer : IAsyncDisposable
         audioFile.Dispose();
 
         isDisposed = true;
+
+        await Task.CompletedTask;
     }
 }
 

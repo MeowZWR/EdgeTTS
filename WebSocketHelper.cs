@@ -18,7 +18,7 @@ internal static class WebSocketHelper
             new ReadOnlyMemory<byte>(buffer),
             WebSocketMessageType.Text,
             true,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
     }
 
     public sealed record WebSocketMessage
@@ -78,7 +78,7 @@ internal static class WebSocketHelper
                 {
                     var result = await _webSocket.ReceiveAsync(
                                      new ArraySegment<byte>(_receiveBuffer),
-                                     cancellationToken);
+                                     cancellationToken).ConfigureAwait(false);
 
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
@@ -87,7 +87,7 @@ internal static class WebSocketHelper
                         return WebSocketMessage.Close;
                     }
 
-                    await ProcessWebSocketMessageAsync(result, previousMessageType);
+                    await ProcessWebSocketMessageAsync(result, previousMessageType).ConfigureAwait(false);
                     previousMessageType = result.MessageType;
 
                     if (result.EndOfMessage) return CreateMessage(result.MessageType);
@@ -113,7 +113,7 @@ internal static class WebSocketHelper
                     break;
 
                 case WebSocketMessageType.Binary:
-                    await _binaryBuffer.WriteAsync(_receiveBuffer.AsMemory(0, result.Count));
+                    await _binaryBuffer.WriteAsync(_receiveBuffer.AsMemory(0, result.Count)).ConfigureAwait(false);
                     break;
 
                 default:
@@ -160,14 +160,12 @@ internal static class WebSocketHelper
     {
         try
         {
-            if (await webSocket.IsConnectedAsync())
-            {
-                await webSocket.CloseAsync(
-                    closeStatus,
-                    statusDescription ?? "Closing",
-                    cancellationToken);
-            }
+            if (await webSocket.IsConnectedAsync().ConfigureAwait(false))
+                await webSocket.CloseAsync(closeStatus, statusDescription ?? "Closing", cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception) { webSocket.Abort(); }
+        catch (Exception)
+        {
+            webSocket.Abort();
+        }
     }
 }

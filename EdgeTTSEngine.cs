@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security;
@@ -62,19 +63,17 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
     {
         ThrowIfDisposed();
         var safeText = SecurityElement.Escape(text.Replace('：', ':'));
-        var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
+        var audioFile = await GetOrCreateAudioFileAsync(safeText, settings).ConfigureAwait(false);
 
         if (!string.IsNullOrWhiteSpace(audioFile))
-            await AudioPlayer.PlayAudioAsync(audioFile);
+            await AudioPlayer.PlayAudioAsync(audioFile).ConfigureAwait(false);
     }
 
     public async Task<string> GetAudioFileAsync(string text, EdgeTTSSettings settings)
     {
         ThrowIfDisposed();
         var safeText  = SecurityElement.Escape(text.Replace('：', ':'));
-        
         var audioFile = await GetOrCreateAudioFileAsync(safeText, settings);
-
         return audioFile;
     }
 
@@ -89,13 +88,17 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
                 Directory.CreateDirectory(cacheFolder);
             
             Log("开始合成语音");
-            var content = await SynthesizeWithRetryAsync(settings, text);
+            
+            var stopWatch = new Stopwatch();
+            stopWatch.Start();
+            
+            var content = await SynthesizeWithRetryAsync(settings, text).ConfigureAwait(false);
             if (content != null)
             {
-                var startTime = DateTime.Now;
-                await File.WriteAllBytesAsync(cacheFile, content);
-                var duration  = DateTime.Now - startTime;
-                Log($"语音合成完成, 耗时: {duration.TotalMilliseconds:F2}ms");
+                await File.WriteAllBytesAsync(cacheFile, content).ConfigureAwait(false);
+                
+                stopWatch.Stop();
+                Log($"语音合成完成, 耗时: {stopWatch.ElapsedMilliseconds:F2}ms");
                 Log($"已将语音保存到缓存文件: {cacheFile}");
             }
         }
@@ -113,16 +116,16 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
         {
             try
             {
-                using var ws = await CreateWebSocketAsync();
+                using var ws = await CreateWebSocketAsync().ConfigureAwait(false);
                 return await AzureWSSynthesiser.SynthesisAsync(
                     ws, operationCts.Token, text,
                     settings.Speed, settings.Pitch,
-                    settings.Volume, settings.Voice);
+                    settings.Volume, settings.Voice).ConfigureAwait(false);
             }
             catch (Exception ex) when (IsConnectionResetError(ex) && retry < 9)
             {
                 Log($"语音合成失败, 正在重试 ({retry + 1}/10): {ex.Message}");
-                await Task.Delay(1000 * (retry + 1));
+                await Task.Delay(1000 * (retry + 1)).ConfigureAwait(false);
             }
         }
 
@@ -134,7 +137,8 @@ public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler
     {
         var ws = SystemClientWebSocket.CreateClientWebSocket();
         ConfigureWebSocket(ws);
-        await ws.ConnectAsync(new($"{WSS_URL}&Sec-MS-GEC={SecMSGEC.Get()}&Sec-MS-GEC-Version=1-132.0.2917.0"), operationCts.Token);
+        await ws.ConnectAsync(new($"{WSS_URL}&Sec-MS-GEC={SecMSGEC.Get()}&Sec-MS-GEC-Version=1-132.0.2917.0"), operationCts.Token)
+                .ConfigureAwait(false);
         return ws;
     }
 
