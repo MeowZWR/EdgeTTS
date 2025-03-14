@@ -5,7 +5,7 @@ namespace EdgeTTS;
 
 public class AudioPlayer : IAsyncDisposable
 {
-    private readonly WaveOutEvent waveOut;
+    private readonly IWavePlayer waveOut;
     private readonly AudioFileReader audioFile;
     private readonly TaskCompletionSource<bool> playbackStarted;
     private bool isDisposed;
@@ -15,7 +15,17 @@ public class AudioPlayer : IAsyncDisposable
     private AudioPlayer(string filePath)
     {
         audioFile = new AudioFileReader(filePath);
-        waveOut = new WaveOutEvent();
+        
+        // 优先使用 DirectSound，如果不可用则回退到 WaveOut
+        try
+        {
+            waveOut = new DirectSoundOut();
+        }
+        catch
+        {
+            waveOut = new WaveOutEvent();
+        }
+        
         waveOut.PlaybackStopped += WaveOut_PlaybackStopped;
         playbackStarted = new TaskCompletionSource<bool>();
     }
@@ -32,7 +42,7 @@ public class AudioPlayer : IAsyncDisposable
         playbackStarted.TrySetResult(false);
     }
 
-    public static async Task PlayAudioAsync(string filePath, int timeoutSeconds = 10, CancellationToken cancellationToken = default)
+    public static async Task PlayAudioAsync(string filePath, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(filePath))
             throw new ArgumentException("Path is null or empty", nameof(filePath));
@@ -41,10 +51,10 @@ public class AudioPlayer : IAsyncDisposable
             throw new FileNotFoundException("Audio file not found", filePath);
 
         await using var player = new AudioPlayer(filePath);
-        await player.PlayInternalAsync(timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        await player.PlayInternalAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task PlayInternalAsync(int timeoutSeconds, CancellationToken cancellationToken)
+    private async Task PlayInternalAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -53,10 +63,11 @@ public class AudioPlayer : IAsyncDisposable
             PlayStateChanged?.Invoke(this, new PlayStateChangedEventArgs(WMPPlayState.wmppsPlaying));
             playbackStarted.TrySetResult(true);
 
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
-
-            await Task.Delay(-1, timeoutCts.Token).ConfigureAwait(false);
+            // 等待音频播放完成或取消
+            while (IsPlaying && !cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {

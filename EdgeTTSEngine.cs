@@ -9,7 +9,8 @@ namespace EdgeTTS;
 
 public sealed class EdgeTTSEngine(string cacheFolder, Action<string>? logHandler = null) : IDisposable
 {
-    private const    string                  WSS_URL      = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+    private const string WSS_URL =
+        "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
     private readonly CancellationTokenSource operationCts = new();
     private          bool                    disposed;
 
