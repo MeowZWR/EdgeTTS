@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security;
 using System.Security.Cryptography;
@@ -95,6 +96,139 @@ public sealed class EdgeTTSEngine : IDisposable
         ThrowIfDisposed();
         var audioFile = await GetOrCreateAudioFileAsync(text, settings);
         return audioFile;
+    }
+
+    /// <summary>
+    /// 批量获取多个文本的音频文件路径，高效率地预先合成多个文本音频
+    /// </summary>
+    /// <param name="texts">要转换为语音的文本集合</param>
+    /// <param name="settings">语音合成设置</param>
+    /// <param name="maxConcurrency">最大并行处理数量，默认为4</param>
+    /// <param name="progressCallback">进度回调函数，参数为已完成数量和总数量</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>包含所有文本对应音频文件路径的字典</returns>
+    public async Task<Dictionary<string, string>> GetAudioFilesAsync(
+        IEnumerable<string> texts, 
+        EdgeTTSSettings settings, 
+        int maxConcurrency = 4,
+        Action<int, int>? progressCallback = null,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        
+        var textList = texts.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+        if (textList.Count == 0) return new Dictionary<string, string>();
+        
+        var result = new ConcurrentDictionary<string, string>();
+        var completedCount = 0;
+        
+        Log($"开始批量合成 {textList.Count} 个文本的语音");
+        var totalStopwatch = new Stopwatch();
+        totalStopwatch.Start();
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operationCts.Token);
+        
+        var parallelOptions = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = maxConcurrency,
+            CancellationToken = linkedCts.Token
+        };
+        
+        try
+        {
+            await Parallel.ForEachAsync(textList, parallelOptions, async (text, _) =>
+            {
+                var audioFile = await GetOrCreateAudioFileAsync(text, settings).ConfigureAwait(false);
+                result[text] = audioFile;
+                var completed = Interlocked.Increment(ref completedCount);
+                progressCallback?.Invoke(completed, textList.Count);
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            Log("批量语音合成已取消");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log($"批量语音合成过程中发生错误: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            totalStopwatch.Stop();
+            Log($"批量语音合成完成，共 {completedCount}/{textList.Count} 个文本，总耗时: {totalStopwatch.ElapsedMilliseconds}ms");
+        }
+        
+        return new Dictionary<string, string>(result);
+    }
+
+    /// <summary>
+    /// 批量获取多个文本和设置组合的音频文件路径，高效率地预先合成多个不同配置的文本音频
+    /// </summary>
+    /// <param name="textSettingsPairs">要转换为语音的文本和设置组合集合</param>
+    /// <param name="maxConcurrency">最大并行处理数量，默认为4</param>
+    /// <param name="progressCallback">进度回调函数，参数为已完成数量和总数量</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>包含所有文本和设置组合对应音频文件路径的字典</returns>
+    public async Task<Dictionary<(string Text, EdgeTTSSettings Settings), string>> GetAudioFilesWithSettingsAsync(
+        IEnumerable<(string Text, EdgeTTSSettings Settings)> textSettingsPairs,
+        int maxConcurrency = 4,
+        Action<int, int>? progressCallback = null,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        
+        var pairsList = textSettingsPairs
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Text))
+            .ToList();
+            
+        if (pairsList.Count == 0) 
+            return new Dictionary<(string Text, EdgeTTSSettings Settings), string>();
+        
+        var result         = new ConcurrentDictionary<(string Text, EdgeTTSSettings Settings), string>();
+        var completedCount = 0;
+        
+        Log($"开始批量合成 {pairsList.Count} 个不同配置的文本语音");
+        var totalStopwatch = new Stopwatch();
+        totalStopwatch.Start();
+        
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operationCts.Token);
+        
+        var parallelOptions = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = maxConcurrency,
+            CancellationToken = linkedCts.Token
+        };
+        
+        try
+        {
+            await Parallel.ForEachAsync(pairsList, parallelOptions, async (pair, _) =>
+            {
+                var (text, settings) = pair;
+                var audioFile = await GetOrCreateAudioFileAsync(text, settings).ConfigureAwait(false);
+                result[(text, settings)] = audioFile;
+                var completed = Interlocked.Increment(ref completedCount);
+                progressCallback?.Invoke(completed, pairsList.Count);
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            Log("批量语音合成已取消");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log($"批量语音合成过程中发生错误: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            totalStopwatch.Stop();
+            Log($"批量语音合成完成，共 {completedCount}/{pairsList.Count} 个文本，总耗时: {totalStopwatch.ElapsedMilliseconds}ms");
+        }
+        
+        return new Dictionary<(string Text, EdgeTTSSettings Settings), string>(result);
     }
 
     /// <summary>
