@@ -2,11 +2,11 @@ namespace EdgeTTS;
 
 public class EdgeTTSSettings
 {
-    public int    AudioDeviceId { get; set; } = 0;
-    public int    Speed         { get; set; } = 100;
-    public int    Pitch         { get; set; } = 100;
-    public int    Volume        { get; set; } = 100;
-    public string Voice         { get; set; } = "zh-CN-YunyangNeural";
+    public int    DeviceID { get; set; }
+    public int    Speed    { get; set; } = 100;
+    public int    Pitch    { get; set; } = 100;
+    public int    Volume   { get; set; } = 100;
+    public string Voice    { get; set; } = "zh-CN-YunyangNeural";
 
     public Dictionary<string, string> PhonemeReplacements { get; set; } = new()
     {
@@ -15,5 +15,5 @@ public class EdgeTTSSettings
     };
 
     public override string ToString() => 
-        $"{nameof(AudioDeviceId)}: {AudioDeviceId}, {nameof(Speed)}: {Speed}, {nameof(Pitch)}: {Pitch}, {nameof(Volume)}: {Volume}, {nameof(Voice)}: {Voice}";
+        $"{nameof(Speed)}: {Speed}, {nameof(Pitch)}: {Pitch}, {nameof(Volume)}: {Volume}, {nameof(Voice)}: {Voice}";
 }

@@ -84,7 +84,7 @@ public sealed class EdgeTTSEngine : IDisposable
         ThrowIfDisposed();
         var audioFile = await GetOrCreateAudioFileAsync(text, settings).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(audioFile)) return;
-        await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume, settings.AudioDeviceId).ConfigureAwait(false);
+        await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume, settings.DeviceID).ConfigureAwait(false);
     }
 
     /// <summary>
