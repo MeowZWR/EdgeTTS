@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
+using NAudio.CoreAudioApi;
+using NAudio.Wave;
 
 namespace EdgeTTS;
 
@@ -82,7 +84,7 @@ public sealed class EdgeTTSEngine : IDisposable
         ThrowIfDisposed();
         var audioFile = await GetOrCreateAudioFileAsync(text, settings).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(audioFile)) return;
-        await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume).ConfigureAwait(false);
+        await AudioPlayer.PlayAudioAsync(audioFile, settings.Volume, settings.AudioDeviceId).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -205,6 +207,81 @@ public sealed class EdgeTTSEngine : IDisposable
         }
         
         return new Dictionary<string, string>(result);
+    }
+    
+    /// <summary>
+    /// 获取系统默认音频输出设备的ID
+    /// </summary>
+    /// <returns>默认音频设备ID，如果无法获取则返回-1</returns>
+    public static int GetDefaultAudioDeviceId()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            var defaultDevice = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            var defaultDeviceName = defaultDevice.FriendlyName;
+            
+            for (var deviceNumber = 0; deviceNumber < WaveOut.DeviceCount; deviceNumber++)
+            {
+                var capabilities = WaveOut.GetCapabilities(deviceNumber);
+                
+                // 尝试查找精确匹配或包含选定设备名称的设备
+                if (capabilities.ProductName.Equals(defaultDeviceName, StringComparison.OrdinalIgnoreCase) || 
+                    capabilities.ProductName.Contains(defaultDeviceName, StringComparison.OrdinalIgnoreCase) || 
+                    defaultDeviceName.Contains(capabilities.ProductName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return deviceNumber;
+                }
+            }
+            
+            // 如果没有找到匹配的设备，返回第一个设备的ID（如果存在）
+            return WaveOut.DeviceCount > 0 ? 0 : -1;
+        }
+        catch
+        {
+            // 获取默认设备失败
+            return -1;
+        }
+    }
+    
+    
+    /// <summary>
+    /// 获取系统所有可用的音频输出设备
+    /// </summary>
+    /// <returns>音频设备列表</returns>
+    public static List<AudioDevice> GetAudioDevices()
+    {
+        var devices = new List<AudioDevice>();
+        
+        try
+        {
+            // 使用NAudio的WaveOut获取设备
+            for (var i = 0; i < WaveOut.DeviceCount; i++)
+            {
+                var capabilities = WaveOut.GetCapabilities(i);
+                devices.Add(new AudioDevice(i, capabilities.ProductName));
+            }
+            
+            // 如果没有找到任何设备，尝试使用CoreAudioAPI
+            if (devices.Count == 0)
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                var outputDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+                
+                for (var i = 0; i < outputDevices.Count; i++)
+                {
+                    var device = outputDevices[i];
+                    devices.Add(new AudioDevice(i, device.FriendlyName));
+                }
+            }
+        }
+        catch
+        {
+            // 如果获取设备失败，至少添加一个默认设备
+            devices.Add(new AudioDevice(-1, "默认音频设备"));
+        }
+        
+        return devices;
     }
 
     /// <summary>

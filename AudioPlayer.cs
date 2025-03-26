@@ -1,5 +1,4 @@
 using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
 
 namespace EdgeTTS;
 
@@ -12,18 +11,40 @@ public class AudioPlayer : IAsyncDisposable
 
     public event EventHandler<PlayStateChangedEventArgs>? PlayStateChanged;
 
-    private AudioPlayer(string filePath)
+    private AudioPlayer(string filePath, int audioDeviceId = -1)
     {
         audioFile = new AudioFileReader(filePath);
         
-        // 优先使用 DirectSound，如果不可用则回退到 WaveOut
-        try
+        if (audioDeviceId >= 0 && audioDeviceId < WaveOut.DeviceCount)
         {
-            waveOut = new DirectSoundOut();
+            try
+            {
+                waveOut = new WaveOutEvent { DeviceNumber = audioDeviceId };
+            }
+            catch
+            {
+                // 优先使用 DirectSound，如果不可用则回退到 WaveOut
+                try
+                {
+                    waveOut = new DirectSoundOut();
+                }
+                catch
+                {
+                    waveOut = new WaveOutEvent();
+                }
+            }
         }
-        catch
+        else
         {
-            waveOut = new WaveOutEvent();
+            // 优先使用 DirectSound，如果不可用则回退到 WaveOut
+            try
+            {
+                waveOut = new DirectSoundOut();
+            }
+            catch
+            {
+                waveOut = new WaveOutEvent();
+            }
         }
         
         waveOut.PlaybackStopped += WaveOut_PlaybackStopped;
@@ -42,7 +63,7 @@ public class AudioPlayer : IAsyncDisposable
         playbackStarted.TrySetResult(false);
     }
 
-    public static async Task PlayAudioAsync(string filePath, int volume = 100, CancellationToken cancellationToken = default)
+    public static async Task PlayAudioAsync(string filePath, int volume = 100, int audioDeviceId = -1, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(filePath))
             throw new ArgumentException("Path is null or empty", nameof(filePath));
@@ -50,7 +71,7 @@ public class AudioPlayer : IAsyncDisposable
         if (!File.Exists(filePath))
             throw new FileNotFoundException("Audio file not found", filePath);
 
-        await using var player = new AudioPlayer(filePath);
+        await using var player = new AudioPlayer(filePath, audioDeviceId);
         player.SetVolume(volume);
         await player.PlayInternalAsync(cancellationToken).ConfigureAwait(false);
     }
