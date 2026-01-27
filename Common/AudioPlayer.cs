@@ -2,19 +2,23 @@ using NAudio.Wave;
 
 namespace EdgeTTS.Common;
 
-public class AudioPlayer : IAsyncDisposable
+public sealed class AudioPlayer : IDisposable, IAsyncDisposable
 {
-    private readonly IWavePlayer waveOut;
-    private readonly AudioFileReader audioFile;
+    private readonly AudioFileReader            audioFile;
     private readonly TaskCompletionSource<bool> playbackStarted;
-    private bool isDisposed;
+    private readonly IWavePlayer                waveOut;
+    private          bool                       isDisposed;
 
-    public event EventHandler<PlayStateChangedEventArgs>? PlayStateChanged;
-
-    private AudioPlayer(string filePath, int audioDeviceID = -1)
+    public AudioPlayer(string filePath, int audioDeviceID = -1)
     {
+        if (string.IsNullOrWhiteSpace(filePath))
+            throw new ArgumentException("Path is null or empty", nameof(filePath));
+
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException("Audio file not found", filePath);
+
         audioFile = new AudioFileReader(filePath);
-        
+
         if (audioDeviceID >= 0 && audioDeviceID < WaveOut.DeviceCount)
         {
             try
@@ -46,9 +50,9 @@ public class AudioPlayer : IAsyncDisposable
                 waveOut = new WaveOutEvent();
             }
         }
-        
+
         waveOut.PlaybackStopped += WaveOut_PlaybackStopped;
-        playbackStarted = new TaskCompletionSource<bool>();
+        playbackStarted         =  new TaskCompletionSource<bool>();
     }
 
     public bool IsPlaying => waveOut.PlaybackState == PlaybackState.Playing;
@@ -56,6 +60,34 @@ public class AudioPlayer : IAsyncDisposable
     public TimeSpan CurrentPosition => audioFile.CurrentTime;
 
     public TimeSpan Duration => audioFile.TotalTime;
+
+    public async ValueTask DisposeAsync()
+    {
+        Dispose();
+        await Task.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+        if (isDisposed) return;
+
+        try
+        {
+            waveOut.Stop();
+        }
+        catch
+        {
+            // ignored
+        }
+
+        waveOut.PlaybackStopped -= WaveOut_PlaybackStopped;
+        waveOut.Dispose();
+        audioFile.Dispose();
+
+        isDisposed = true;
+    }
+
+    public event EventHandler<PlayStateChangedEventArgs>? PlayStateChanged;
 
     private void WaveOut_PlaybackStopped(object? sender, StoppedEventArgs e)
     {
@@ -65,15 +97,29 @@ public class AudioPlayer : IAsyncDisposable
 
     public static async Task PlayAudioAsync(string filePath, int volume = 100, int audioDeviceID = -1, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(filePath))
-            throw new ArgumentException("Path is null or empty", nameof(filePath));
-
-        if (!File.Exists(filePath))
-            throw new FileNotFoundException("Audio file not found", filePath);
-
         await using var player = new AudioPlayer(filePath, audioDeviceID);
-        player.SetVolume(volume);
-        await player.PlayInternalAsync(cancellationToken).ConfigureAwait(false);
+        await player.PlayAsync(volume, cancellationToken).ConfigureAwait(false);
+    }
+
+    public void Stop()
+    {
+        if (isDisposed) return;
+
+        try
+        {
+            waveOut.Stop();
+        }
+        catch
+        {
+            // ignored
+        }
+    }
+
+    public Task PlayAsync(int volume = 100, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        SetVolume(volume);
+        return PlayInternalAsync(cancellationToken);
     }
 
     private void SetVolume(int volume)
@@ -86,16 +132,16 @@ public class AudioPlayer : IAsyncDisposable
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             waveOut.Init(audioFile);
+            cancellationToken.ThrowIfCancellationRequested();
             waveOut.Play();
             PlayStateChanged?.Invoke(this, new PlayStateChangedEventArgs(WMPPlayState.Playing));
             playbackStarted.TrySetResult(true);
 
             // 等待音频播放完成或取消
             while (IsPlaying && !cancellationToken.IsCancellationRequested)
-            {
                 await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-            }
         }
         catch (OperationCanceledException)
         {
@@ -103,25 +149,18 @@ public class AudioPlayer : IAsyncDisposable
         }
         finally
         {
-            waveOut.Stop();
+            Stop();
         }
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        if (isDisposed) return;
-
-        waveOut.Stop();
-        waveOut.Dispose();
-        audioFile.Dispose();
-
-        isDisposed = true;
-
-        await Task.CompletedTask;
-    }
+    private void ThrowIfDisposed() =>
+        ObjectDisposedException.ThrowIf(isDisposed, typeof(AudioPlayer));
 }
 
-public class PlayStateChangedEventArgs(WMPPlayState playState) : EventArgs
+public class PlayStateChangedEventArgs
+(
+    WMPPlayState playState
+) : EventArgs
 {
     public WMPPlayState PlayState { get; } = playState;
 }
