@@ -14,20 +14,15 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="NAudio" Version="2.2.1"/>
-        <PackageReference Include="System.Net.WebSockets.Client.Managed" Version="1.0.22"/>
+        <PackageReference Include="NAudio" Version="2.2.1" />
+        <PackageReference Include="System.Net.WebSockets.Client.Managed" Version="1.0.22" />
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     </ItemGroup>
 
     <ItemGroup>
         <None Include="voices.json">
             <CopyToOutputDirectory>Always</CopyToOutputDirectory>
         </None>
-    </ItemGroup>
-
-    <ItemGroup>
-        <Reference Include="Newtonsoft.Json">
-            <HintPath>C:\Users\AtmoOmen\AppData\Roaming\XIVLauncherCN\addon\Hooks\dev\Newtonsoft.Json.dll</HintPath>
-        </Reference>
     </ItemGroup>
 
 </Project>
